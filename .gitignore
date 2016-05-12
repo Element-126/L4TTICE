@@ -1,3 +1,4 @@
 lattice
 *.o
 *.h5
+usr/*
