@@ -68,7 +68,7 @@ __device__ float delta_S_free(float * f, const size_t Idx, const float zeta) {
 
   const float fi = f[Idx];
   const float delta_V = 0.5f*m2*zeta*(2.0f*fi+zeta);
-  return delta_S_kin(f, Idx, zeta) - a*a*a*a*delta_V;
+  return delta_S_kin(f, Idx, zeta) + a*a*a*a*delta_V;
 }
 
 __device__ float delta_S_phi4(float * f, const size_t Idx, const float zeta) {
@@ -76,7 +76,7 @@ __device__ float delta_S_phi4(float * f, const size_t Idx, const float zeta) {
   const float fi = f[Idx];     // φi
   const float fiP = fi + zeta; // φi + ζ
   const float delta_V = 0.5f*m2*( fiP*fiP - fi*fi ) + 0.25f*lambda*( fiP*fiP*fiP*fiP - fi*fi*fi*fi );
-  return delta_S_kin(f, Idx, zeta) - a*a*a*a*delta_V;
+  return delta_S_kin(f, Idx, zeta) + a*a*a*a*delta_V;
 }
 
 
