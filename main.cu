@@ -2,13 +2,14 @@
 #include <curand.h>
 #include <curand_kernel.h>
 #include <utility>
-#include <iostream>
+#include <cassert>
+#include <cstdio>
 // #include "H5Cpp.h"
 
 /* Geometry & parameters ******************************************************/
 
 // Block size
-constexpr size_t B0 = 32; // = warp size, for coalesced read & write
+constexpr size_t B0 = 32; // ideally = warp size, for coalesced read & write
 constexpr size_t B1 = 4;
 constexpr size_t B2 = 4;
 constexpr size_t B3 = 2;
@@ -17,10 +18,10 @@ constexpr size_t blockSize = B0*B1*B2*B3;
 // Shared memory usage: 28kio including RNG state.
 
 // Grid size
-constexpr size_t G0 = 2;
-constexpr size_t G1 = 16;
-constexpr size_t G2 = 16;
-constexpr size_t G3 = 32;
+constexpr size_t G0 = 1;
+constexpr size_t G1 = 4;
+constexpr size_t G2 = 4;
+constexpr size_t G3 = 8;
 constexpr size_t gridSize = G0*G1*G2*G3;
   
 // Lattice size
@@ -46,9 +47,9 @@ constexpr float lambda = 1.0f;
 
 // Monte-Carlo parameters
 constexpr unsigned int N_cor = 20;
-constexpr unsigned int N_cf  = 100;
+constexpr unsigned int N_cf  = 50;
 constexpr unsigned int N_th  = 10*N_cor;
-constexpr float epsilon = 1.4f;
+constexpr float epsilon = 0.5f;
 
 /******************************************************************************/
 
@@ -90,7 +91,7 @@ __device__ size_t array_idx(size_t Idx) {
   const size_t j = Idx / N0;
   Idx -= j * N0;
 
-  return Idx+1 + M0*(j+1) + M0*M1*(k+1) * M0*M1*M2*(l+1);
+  return Idx+1 + M0*(j+1) + M0*M1*(k+1) + M0*M1*M2*(l+1);
 }
 
 template <float (*delta_S)(float*, const size_t, const float)>
@@ -192,38 +193,41 @@ void mc_update(float* lat, float * lat_old, curandState * states) {
 
 constexpr auto dS = delta_S_free;
 
-__host__ int main() {
+__host__ void mc_average() {
+
+  fprintf(stderr, "Lattice: (%d,%d,%d,%d)\n", N0, N1, N2, N3);
+  fprintf(stderr, "Array:   (%d,%d,%d,%d)\n", M0, M1, M2, M3);
+  fprintf(stderr, "M_count = %d\n", M_count);
   
-  std::cerr << "Allocating lattice arrays..." << std::endl;
+  fprintf(stderr, "Allocating lattice arrays...\n");
   // Allocate lattice on device (double buffered)
   float * lat     = nullptr;
   float * lat_old = nullptr;
-  std::cerr << "Requesting " << M_bytes << " bytes...";
+  fprintf(stderr, "Requesting 2×%d bytes...", M_bytes);
   cudaMalloc(&lat    , M_bytes);
-  std::cerr << " ok." << std::endl;
-  std::cerr << "Requesting " << M_bytes << " bytes...";
   cudaMalloc(&lat_old, M_bytes);
-  std::cerr << " ok." << std::endl;
-  std::cerr << "Memset'ting to 0...";
+  fprintf(stderr, " done.\n");
+  fprintf(stderr, "Memset'ting to 0...");
   cudaMemset(lat    , 0., M_count);
   cudaMemset(lat_old, 0., M_count);
-  std::cerr << " done." << std::endl;
+  fprintf(stderr, " done.\n");
 
   // Seed rng on each thread
-  std::cerr << "Allocating RNG...";
+  fprintf(stderr, "Allocating RNG...\n");
+  fprintf(stderr, "Requesting %d bytes...", M_count*sizeof(curandState));
   curandState * states;
   cudaMalloc(&states, M_count*sizeof(curandState));
-  std::cerr << " done." << std::endl;
-  std::cerr << "Initializing RNG...";
+  fprintf(stderr, " done.\n");
+  fprintf(stderr, "Initializing RNG...");
   rng_init<<<gridSize,blockSize>>>(states);
   cudaDeviceSynchronize();
-  std::cerr << " done." << std::endl;
+  fprintf(stderr, " done.\n");
 
   // Thermalize lattice
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
-  std::cerr << "Thermalizing lattice...";
+  fprintf(stderr, "Thermalizing lattice...");
   cudaEventRecord(start);
   for (size_t i = 0 ; i < N_th ; ++i) {
     mc_update<dS>(lat, lat_old, states);
@@ -232,27 +236,28 @@ __host__ int main() {
   cudaEventSynchronize(stop);
   float ms;
   cudaEventElapsedTime(&ms, start, stop);
-  std::cerr << " done in " << ms/1e3 << " s" << std::endl;
+  fprintf(stderr, " done in %fs.\n", 1e-3*ms);
 
   // Run Metropolis algorithm
-  std::cerr << "Running MC...";
+  fprintf(stderr, "Running MC...");
   cudaEventRecord(start);
   for (size_t i = 0 ; i < N_cf ; ++i) {
     for (size_t j = 0 ; j < N_cor ; ++j) {
       mc_update<dS>(lat, lat_old, states);
     }
+    fprintf(stderr, " %d", i);
     // TODO - Write result back here... (using lat_old)
   }
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&ms, start, stop);
-  std::cerr << " done in " << ms/1e3 << " s" << std::endl;
+  fprintf(stderr, " done in %fs.\n", 1e-3*ms);
 
 
   // Finalization
   // ============
 
-  std::cerr << "Finalization...";
+  fprintf(stderr, "Finalization...");
   // Free device memory
   cudaFree(lat);
   cudaFree(lat_old);
@@ -260,5 +265,12 @@ __host__ int main() {
   lat     = nullptr;
   lat_old = nullptr;
   states  = nullptr;
-  std::cerr << " done." << std::endl;
+  fprintf(stderr, " done.\n");
+}
+
+__host__ int main() {
+
+  mc_average();
+
+  return 0;
 }
