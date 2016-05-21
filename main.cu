@@ -6,23 +6,26 @@
 #include <cstdio>
 // #include "H5Cpp.h"
 
-/* Geometry & parameters ******************************************************/
+/******************************************************************************/
+
+// Geometry & parameters
+// =====================
 
 // Block size
-constexpr size_t B0 = 32; // ideally = warp size, for coalesced read & write
-constexpr size_t B1 = 4;
-constexpr size_t B2 = 4;
-constexpr size_t B3 = 2;
-constexpr size_t blockSize = B0*B1*B2*B3;
-// Maximal number of threads 32*4*4*2 = 1024
-// Shared memory usage: 28kio including RNG state.
+constexpr size_t B0 = 8; // ideally = warp size, for coalesced read & write
+constexpr size_t B1 = 8;
+constexpr size_t B2 = 8;
+constexpr size_t B3 = 8;
+// Number of threads 8³ = 512
+// Loop over the last dimension
+// Shared memory usage: 40000o including halos.
+// Then grid-stride loop to reuse the RNG state
 
 // Grid size
-constexpr size_t G0 = 1;
-constexpr size_t G1 = 4;
-constexpr size_t G2 = 4;
-constexpr size_t G3 = 8;
-constexpr size_t gridSize = G0*G1*G2*G3;
+constexpr size_t G0 = 2;
+constexpr size_t G1 = 2;
+constexpr size_t G2 = 2;
+constexpr size_t G3 = 2;
   
 // Lattice size
 constexpr size_t N0 = B0*G0;
@@ -47,11 +50,14 @@ constexpr float lambda = 1.0f;
 
 // Monte-Carlo parameters
 constexpr unsigned int N_cor = 20;
-constexpr unsigned int N_cf  = 50;
+constexpr unsigned int N_cf  = 100;
 constexpr unsigned int N_th  = 10*N_cor;
-constexpr float epsilon = 0.5f;
+constexpr float epsilon = 0.7f;
 
 /******************************************************************************/
+
+// Variation of the action
+// =======================
 
 // Change in the action when φ(i) → φ(i) + ζ
 // Idx: array index, including ghost cells
@@ -65,6 +71,7 @@ __device__ float delta_S_kin(float * f, const size_t Idx, const float zeta) {
                     );
 }
 
+// Free field: V(φ) = ½m²φ²
 __device__ float delta_S_free(float * f, const size_t Idx, const float zeta) {
 
   const float fi = f[Idx];
@@ -72,6 +79,7 @@ __device__ float delta_S_free(float * f, const size_t Idx, const float zeta) {
   return delta_S_kin(f, Idx, zeta) + a*a*a*a*delta_V;
 }
 
+// Interacting field: V(φ) = ½m²φ² + ¼λφ⁴
 __device__ float delta_S_phi4(float * f, const size_t Idx, const float zeta) {
 
   const float fi = f[Idx];     // φi
@@ -80,41 +88,36 @@ __device__ float delta_S_phi4(float * f, const size_t Idx, const float zeta) {
   return delta_S_kin(f, Idx, zeta) + a*a*a*a*delta_V;
 }
 
+// Choice of the action used in the simulation
+constexpr auto dS = delta_S_free;
 
-// Compute array index (includes ghost cells)
-__device__ size_t array_idx(size_t Idx) {
+/******************************************************************************/
 
-  const size_t l = Idx / (N0*N1*N2);
-  Idx -= l * N0*N1*N2;
-  const size_t k = Idx / (N0*N1);
-  Idx -= k * N0*N1;
-  const size_t j = Idx / N0;
-  Idx -= j * N0;
+// Kernels
+// =======
 
-  return Idx+1 + M0*(j+1) + M0*M1*(k+1) + M0*M1*M2*(l+1);
-}
+// // Main kernel, performing one Monte-Carlo iteration
+// template <float (*delta_S)(float*, const size_t, const float)>
+// __global__ void mc_kernel(float * lat, float * lo, curandState * states) {
 
-template <float (*delta_S)(float*, const size_t, const float)>
-__global__ void mc_kernel(float * lat, float * lo, curandState * states) {
+//   // Global thread index = lattice site
+//   const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+//   // Array index
+//   const size_t Idx = array_idx(tid);
 
-  // Global thread index = lattice site
-  const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  // Array index
-  const size_t Idx = array_idx(tid);
+//   curandState state = states[tid];
+//   float zeta = (2.0f*curand_uniform(&state) - 1.0f) * epsilon; // ζ ∈ [-ε,+ε]
 
-  curandState state = states[tid];
-  float zeta = (2.0f*curand_uniform(&state) - 1.0f) * epsilon; // ζ ∈ [-ε,+ε]
-
-  // Compute change in the action due to variation ζ at size Idx
-  const float delta_S_i = delta_S(lo, Idx, zeta);
+//   // Compute change in the action due to variation ζ at size Idx
+//   const float delta_S_i = delta_S(lo, Idx, zeta);
   
-  // Update the lattice depending on the variation ΔSi
-  const float update = (float) (delta_S_i < 0.0f || (exp(-delta_S_i) > curand_uniform(&state)));
-  // Is the above really branchless ?
-  lat[Idx] += update * zeta;
+//   // Update the lattice depending on the variation ΔSi
+//   const float update = (float) (delta_S_i < 0.0f || (exp(-delta_S_i) > curand_uniform(&state)));
+//   // Is the above really branchless ?
+//   lat[Idx] += update * zeta;
 
-  states[tid] = state;
-}
+//   states[tid] = state;
+// }
 
 // Initialize RNG state
 __global__ void rng_init(curandState * states) {
@@ -123,7 +126,11 @@ __global__ void rng_init(curandState * states) {
   curand_init((unsigned long long)clock() + Idx, 0, 0, &states[Idx]);
 }
 
-// Exchange 3D "faces" of the 4D lattice
+/******************************************************************************/
+
+// Exchange of the 3D "faces" of the 4D lattice
+// ============================================
+
 // Face 0 (stride = 1)
 __global__ void exchange_faces_0(float * lat) {
 
@@ -182,6 +189,12 @@ __host__ void exchange_faces(float * lat) {
   cudaDeviceSynchronize();
 }
 
+/******************************************************************************/
+
+// Host-side logic
+// ===============
+
+// Perform one Monte-Carlo iteration
 template <float (*delta_S)(float*, const size_t, const float)>
 void mc_update(float* lat, float * lat_old, curandState * states) {
 
@@ -191,8 +204,8 @@ void mc_update(float* lat, float * lat_old, curandState * states) {
   std::swap(lat, lat_old);
 }
 
-constexpr auto dS = delta_S_free;
 
+// Compute the space-average of the time-slice correlator value over many configurations.
 __host__ void mc_average() {
 
   fprintf(stderr, "Lattice: (%d,%d,%d,%d)\n", N0, N1, N2, N3);
