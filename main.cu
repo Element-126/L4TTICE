@@ -42,7 +42,7 @@ constexpr size_t M_count = M0*M1*M2*M3;
 constexpr size_t M_bytes = M_count*sizeof(float);
 
 // Lattice spacing
-constexpr float a = 1.0f;
+constexpr float a = 0.5f;
 
 // Physical parameters
 constexpr float m2 = 1.0f;
@@ -124,10 +124,10 @@ constexpr auto dS = delta_S_free;
 // }
 
 // Initialize RNG state
-__global__ void rng_init(curandState * states) {
+__global__ void rng_init(unsigned long long seed, curandState * states) {
 
   const size_t Idx = blockIdx.x * blockDim.x + threadIdx.x;
-  curand_init((unsigned long long)clock() + Idx, 0, 0, &states[Idx]);
+  curand_init(seed, Idx, 0, &states[Idx]);
 }
 
 /******************************************************************************/
@@ -221,23 +221,23 @@ __host__ void mc_average() {
   float * lat     = nullptr;
   float * lat_old = nullptr;
   fprintf(stderr, "Requesting 2×%d bytes...", M_bytes);
-  cudaMalloc(&lat    , M_bytes);
-  cudaMalloc(&lat_old, M_bytes);
+  assert(cudaMalloc(&lat    , M_bytes) == cudaSuccess);
+  assert(cudaMalloc(&lat_old, M_bytes) == cudaSuccess);
   fprintf(stderr, " done.\n");
   fprintf(stderr, "Memset'ting to 0...");
-  cudaMemset(lat    , 0., M_count);
-  cudaMemset(lat_old, 0., M_count);
+  assert(cudaMemset(lat    , 0., M_count) == cudaSuccess);
+  assert(cudaMemset(lat_old, 0., M_count) == cudaSuccess);
   fprintf(stderr, " done.\n");
 
   // Seed rng on each thread
   fprintf(stderr, "Allocating RNG...\n");
   fprintf(stderr, "Requesting %d bytes...", M_count*sizeof(curandState));
   curandState * states;
-  cudaMalloc(&states, M_count*sizeof(curandState));
+  assert(cudaMalloc(&states, M_count*sizeof(curandState)) == cudaSuccess);
   fprintf(stderr, " done.\n");
   fprintf(stderr, "Initializing RNG...");
   rng_init<<<gridSize,blockSize>>>(states);
-  cudaDeviceSynchronize();
+  assert(cudaDeviceSynchronize() == cudaSuccess);
   fprintf(stderr, " done.\n");
 
   // Allocate memory used to store correlation data
@@ -246,7 +246,7 @@ __host__ void mc_average() {
   assert(corr_buf_h);
   // Device-side buffer
   float * corr_buf_d = nullptr;
-  cudaMalloc(&corr_buf_d, N1*N2*N3*sizeof(float));
+  assert(cudaMalloc(&corr_buf_d, N1*N2*N3*sizeof(float)) == cudaSuccess);
   // Array storing the final results
   float * corr = (float*) calloc(N0*N_cf, sizeof(float));
   assert(corr);
@@ -321,23 +321,23 @@ void generate_single_conf() {
   float * lat     = nullptr;
   float * lat_old = nullptr;
   fprintf(stderr, "Requesting 2×%d bytes...", M_bytes);
-  cudaMalloc(&lat    , M_bytes);
-  cudaMalloc(&lat_old, M_bytes);
+  assert(cudaMalloc(&lat    , M_bytes) == cudaSuccess);
+  assert(cudaMalloc(&lat_old, M_bytes) == cudaSuccess);
   fprintf(stderr, " done.\n");
   fprintf(stderr, "Memset'ting to 0...");
-  cudaMemset(lat    , 0., M_count);
-  cudaMemset(lat_old, 0., M_count);
+  assert(cudaMemset(lat    , 0., M_count) == cudaSuccess);
+  assert(cudaMemset(lat_old, 0., M_count) == cudaSuccess);
   fprintf(stderr, " done.\n");
 
   // Seed rng on each thread
   fprintf(stderr, "Allocating RNG...\n");
   fprintf(stderr, "Requesting %d bytes...", M_count*sizeof(curandState));
   curandState * states;
-  cudaMalloc(&states, M_count*sizeof(curandState));
+  assert(cudaMalloc(&states, M_count*sizeof(curandState)) == cudaSuccess);
   fprintf(stderr, " done.\n");
   fprintf(stderr, "Initializing RNG...");
   rng_init<<<gridSize,blockSize>>>(states);
-  cudaDeviceSynchronize();
+  assert(cudaDeviceSynchronize() == cudaSuccess);
   fprintf(stderr, " done.\n");
 
   // Thermalize lattice
