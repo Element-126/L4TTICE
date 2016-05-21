@@ -4,7 +4,7 @@
 #include <utility>
 #include <cassert>
 #include <cstdio>
-// #include "H5Cpp.h"
+#include "H5Cpp.h"
 
 /******************************************************************************/
 
@@ -42,7 +42,7 @@ constexpr size_t M_count = M0*M1*M2*M3;
 constexpr size_t M_bytes = M_count*sizeof(float);
 
 // Lattice spacing
-constexpr float a = 0.5f;
+constexpr float a = 1.0f;
 
 // Physical parameters
 constexpr float m2 = 1.0f;
@@ -53,6 +53,10 @@ constexpr unsigned int N_cor = 20;
 constexpr unsigned int N_cf  = 100;
 constexpr unsigned int N_th  = 10*N_cor;
 constexpr float epsilon = 0.7f;
+
+// Output
+const H5std_string file_name("correlations.h5");
+const H5std_string dataset_name("corr");
 
 /******************************************************************************/
 
@@ -236,6 +240,17 @@ __host__ void mc_average() {
   cudaDeviceSynchronize();
   fprintf(stderr, " done.\n");
 
+  // Allocate memory used to store correlation data
+  // Host-side buffer
+  float * corr_buf_h = (float*) calloc(N1*N2*N3, sizeof(float));
+  assert(corr_buf_h);
+  // Device-side buffer
+  float * corr_buf_d = nullptr;
+  cudaMalloc(&corr_buf_d, N1*N2*N3*sizeof(float));
+  // Array storing the final results
+  float * corr = (float*) calloc(N0*N_cf, sizeof(float));
+  assert(corr);
+
   // Thermalize lattice
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
@@ -255,20 +270,93 @@ __host__ void mc_average() {
   fprintf(stderr, "Running MC...");
   cudaEventRecord(start);
   for (size_t i = 0 ; i < N_cf ; ++i) {
+    // Drop N_cor iterations to damp correlations between successive configurations.
     for (size_t j = 0 ; j < N_cor ; ++j) {
       mc_update<dS>(lat, lat_old, states);
     }
     fprintf(stderr, " %d", i);
-    // TODO - Write result back here... (using lat_old)
+    // Compute the Euclidean time correlations within one configuration.
+    // compute_correlations(lat_old, corr, i, corr_buf_h, corr_buf_d);
   }
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&ms, start, stop);
   fprintf(stderr, " done in %fs.\n", 1e-3*ms);
 
-
+  // Write output to file
+  fprintf(stderr, "Writing to file...");
+  write_correlations(corr);
+  fprintf(stderr, " done.\n");
+  
   // Finalization
   // ============
+
+  fprintf(stderr, "Finalization...");
+  // Free device memory
+  cudaFree(lat);
+  cudaFree(lat_old);
+  cudaFree(states);
+  cudaFree(corr_buf_d);
+  lat        = nullptr;
+  lat_old    = nullptr;
+  states     = nullptr;
+  corr_buf_d = nullptr;
+
+  // Free host memory
+  free(corr_buf_h);
+  free(corr);
+  corr_buf_h = nullptr;
+  corr       = nullptr;
+  fprintf(stderr, " done.\n");
+}
+
+void generate_single_conf() {
+
+  fprintf(stderr, "Lattice: (%d,%d,%d,%d)\n", N0, N1, N2, N3);
+  fprintf(stderr, "Array:   (%d,%d,%d,%d)\n", M0, M1, M2, M3);
+  fprintf(stderr, "M_count = %d\n", M_count);
+  
+  fprintf(stderr, "Allocating lattice arrays...\n");
+  // Allocate lattice on device (double buffered)
+  float * lat     = nullptr;
+  float * lat_old = nullptr;
+  fprintf(stderr, "Requesting 2×%d bytes...", M_bytes);
+  cudaMalloc(&lat    , M_bytes);
+  cudaMalloc(&lat_old, M_bytes);
+  fprintf(stderr, " done.\n");
+  fprintf(stderr, "Memset'ting to 0...");
+  cudaMemset(lat    , 0., M_count);
+  cudaMemset(lat_old, 0., M_count);
+  fprintf(stderr, " done.\n");
+
+  // Seed rng on each thread
+  fprintf(stderr, "Allocating RNG...\n");
+  fprintf(stderr, "Requesting %d bytes...", M_count*sizeof(curandState));
+  curandState * states;
+  cudaMalloc(&states, M_count*sizeof(curandState));
+  fprintf(stderr, " done.\n");
+  fprintf(stderr, "Initializing RNG...");
+  rng_init<<<gridSize,blockSize>>>(states);
+  cudaDeviceSynchronize();
+  fprintf(stderr, " done.\n");
+
+  // Thermalize lattice
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+  fprintf(stderr, "Thermalizing lattice...");
+  cudaEventRecord(start);
+  for (size_t i = 0 ; i < N_th ; ++i) {
+    mc_update<dS>(lat, lat_old, states);
+  }
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  float ms;
+  cudaEventElapsedTime(&ms, start, stop);
+  fprintf(stderr, " done in %fs.\n", 1e-3*ms);
+
+  // Write result to file
+  write_configuration(lat_old);
 
   fprintf(stderr, "Finalization...");
   // Free device memory
@@ -283,6 +371,7 @@ __host__ void mc_average() {
 
 __host__ int main() {
 
+  //generate_single_conf();
   mc_average();
 
   return 0;
