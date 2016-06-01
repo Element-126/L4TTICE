@@ -96,28 +96,7 @@ constexpr auto dS = delta_S_free;
 // Kernels
 // =======
 
-// // Main kernel, performing one Monte-Carlo iteration
-// template <float (*delta_S)(float*, const size_t, const float)>
-// __global__ void mc_kernel(float * lat, float * lo, curandState * states) {
-
-//   // Global thread index = lattice site
-//   const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-//   // Array index
-//   const size_t Idx = array_idx(tid);
-
-//   curandState state = states[tid];
-//   float zeta = (2.0f*curand_uniform(&state) - 1.0f) * epsilon; // ζ ∈ [-ε,+ε]
-
-//   // Compute change in the action due to variation ζ at site Idx
-//   const float delta_S_i = delta_S(lo, Idx, zeta);
-  
-//   // Update the lattice depending on the variation ΔSi
-//   const float update = (float) (delta_S_i < 0.0f || (exp(-delta_S_i) > curand_uniform(&state)));
-//   // Is the above really branchless ?
-//   lat[Idx] += update * zeta;
-
-//   states[tid] = state;
-// }
+// Main kernels, performing one Monte-Carlo iteration on either black or white indices.
 
 /*  MC iteration over "black" indices
  *
@@ -190,18 +169,54 @@ __global__ void mc_update_black(float * lat, curandState * states) {
   states[tid] = state;
 }
 
-// MC iteration over "white" indices
+/*  MC iteration over "white" indices
+ *
+ *  Same grid and block sizes as for black indices.
+ */
 template<float (*delta_S)(float*, const size_t, const float)>
 __global__ void mc_update_white(float * lat, curandState * states) {
 
-  // TODO
+  // Global thread index
+  const size_t t0 = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t t1 = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t t2 = blockIdx.z * blockDim.z + threadIdx.z;
+
+  // Linear thread index
+  const size_t tid = t0 + (N0>>1)*t1 + (N0*Ni>>1)*t2;
+  
+  auto state = states[tid];
+
+  // Grid stride loop in direction 3
+  for (size_t g3 = 0 ; g3 < Gi ; ++g3) {
+
+    // Small loop in direction 3
+    for (size_t b3 = 0 ; b3 < Bi ; ++b3) {
+
+      const size_t t3 = g3*Bi+b3;
+      const size_t parity = (t1 + t2 + t3) & 1; // 0 if t1+t2+t3 even, 1 otherwise
+      // Main difference with "black" indices: opposite parity
+      const size_t Idx = 2*t0+1 + S1*(t1+1) + S2*(t2+1) + S3*(t3+1) + !parity;
+
+      const float zeta = (2.0f*curand_uniform(&state) - 1.0f) * epsilon; // ζ ∈ [-ε,+ε]
+      // Compute change in the action due to variation ζ at site Idx
+      const float delta_S_i = delta_S(lat, Idx, zeta);
+
+      // Update the lattice depending on the variation ΔSi
+      const float update = (float) (delta_S_i < 0.0f || (exp(-delta_S_i) > curand_uniform(&state)));
+      // Is the above really branchless ?
+      lat[Idx] += update * zeta;
+    }
+  }
+
+  // Write RNG state back to global memory
+  states[tid] = state;
 }
 
-// initialize rng state
+// Initialize rng state
 __global__ void rng_init(unsigned long long seed, curandState * states) {
 
-  const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  curand_init(seed, idx, 0, &states[idx]);
+  const size_t Idx = blockIdx.x * blockDim.x + threadIdx.x;
+  curand_init(seed, Idx, 0, &states[Idx]);
 }
 
 /******************************************************************************/
@@ -277,7 +292,8 @@ template <float (*delta_S)(float*, const size_t, const float)>
 void mc_update(float* lat, curandState * states) {
 
   mc_update_black<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states);
-  // mc_update_white<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states);
+  cudaDeviceSynchronize();
+  mc_update_white<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states);
   cudaDeviceSynchronize();
   exchange_faces(lat);
 }
