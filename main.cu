@@ -232,8 +232,8 @@ __global__ void exchange_faces_0(float * lat) {
   const size_t I3 = blockIdx.z * blockDim.z + threadIdx.z + 1;
   const size_t Idx = S1*I1 + S2*I2 + S3*I3;
 
-  lat[Idx         ] = lat[Idx + S1];
-  lat[Idx + (S1+1)] = lat[Idx +  1];
+  lat[Idx         ] = lat[Idx + N0];
+  lat[Idx + (N0+1)] = lat[Idx +  1];
 }
 
 // Face 1 (stride = M0)
@@ -244,8 +244,8 @@ __global__ void exchange_faces_1(float * lat) {
   const size_t I3 = blockIdx.z * blockDim.z + threadIdx.z + 1;
   const size_t Idx = I0 + S2*I2 + S3*I3;
 
-  lat[Idx            ] = lat[Idx + M0*Ni];
-  lat[Idx + M0*(Ni+1)] = lat[Idx + M0   ];
+  lat[Idx            ] = lat[Idx + S1*Ni];
+  lat[Idx + S1*(Ni+1)] = lat[Idx + S1   ];
 }
 
 // Face 2 (stride = M0·M1)
@@ -256,8 +256,8 @@ __global__ void exchange_faces_2(float * lat) {
   const size_t I3 = blockIdx.z * blockDim.z + threadIdx.z + 1;
   const size_t Idx = I0 + S1*I1 + S3*I3;
 
-  lat[Idx               ] = lat[Idx + M0*Mi*Ni];
-  lat[Idx + M0*Mi*(Ni+1)] = lat[Idx + M0*Mi   ];
+  lat[Idx            ] = lat[Idx + S2*Ni];
+  lat[Idx + S2*(Ni+1)] = lat[Idx + S2   ];
 }
 
 // Face 3 (stride = M0·M1·M2)
@@ -268,8 +268,8 @@ __global__ void exchange_faces_3(float * lat) {
   const size_t I2 = blockIdx.z * blockDim.z + threadIdx.z + 1;
   const size_t Idx = I0 + S1*I1 + S2*I2;
 
-  lat[Idx                  ] = lat[Idx + M0*Mi*Mi*Ni];
-  lat[Idx + M0*Mi*Mi*(Ni+1)] = lat[Idx + M0*Mi*Mi   ];
+  lat[Idx            ] = lat[Idx + S3*Ni];
+  lat[Idx + S3*(Ni+1)] = lat[Idx + S3   ];
 }
 
 // Exchange all faces
