@@ -12,16 +12,16 @@
 // =====================
 
 // Block size
-constexpr size_t B0 = 9;
-constexpr size_t Bi = 8;
+constexpr size_t B0 = 4;
+constexpr size_t Bi = 4;
 // Number of threads 8³ = 512
 // Loop over the last dimension
 // Shared memory usage: 44000o including halos.
 // Then grid-stride loop to reuse the RNG state
 
 // Grid size
-constexpr size_t G0 = 2;
-constexpr size_t Gi = 2;
+constexpr size_t G0 = 1;
+constexpr size_t Gi = 1;
   
 // Lattice size
 constexpr size_t N0 = B0*G0;
@@ -45,9 +45,9 @@ constexpr float m2 = 1.0f;
 constexpr float lambda = 1.0f;
 
 // Monte-Carlo parameters
-constexpr unsigned int N_cor = 20;
+constexpr unsigned int N_cor = 1;
 constexpr unsigned int N_cf  = 100;
-constexpr unsigned int N_th  = 10*N_cor;
+constexpr unsigned int N_th  = 1;
 constexpr float epsilon = 0.7f;
 
 // Output
@@ -133,12 +133,13 @@ __global__ void mc_update_black(float * lat, curandState * states) {
   const size_t t2 = blockIdx.z * blockDim.z + threadIdx.z;
 
   // Linear thread index
-  const size_t tid = t0 + (S1>>2)*t1 + (S2>>2)*t2;
+  const size_t tid = t0 + (N0>>1)*t1 + (N0*Ni>>1)*t2;
+  
   auto state = states[tid];
 
   /*  Indices, assuming dimension 0 is even
    *
-   *  Physical index: 2·t0 + N0·t1 + N0·N1·t2 + N0·N1·N2·t3 + parity of (t0+t1+t2+t3)
+   *  Physical index: 2·t0 + N0·t1 + N0·N1·t2 + N0·N1·N2·t3 + parity of (t1+t2+t3)
    *  Ex: 4×4 lattice
    *      +–––––––––+
    *      | 0 · 4 · |
@@ -147,7 +148,7 @@ __global__ void mc_update_black(float * lat, curandState * states) {
    *      | · 3 · 7 |
    *      +–––––––––+
    *
-   *  Array index:    2·t0+1 + M0*(t1+1) + M0·M1·(t2+1) + M0·M1·M2·(t3+1) + parity of (t0+t1+t2+t3)
+   *  Array index:    2·t0+1 + M0*(t1+1) + M0·M1·(t2+1) + M0·M1·M2·(t3+1) + parity of (t1+t2+t3)
    *  Ex: 4×4 lattice
    *
    *      |  halos  |
@@ -171,7 +172,7 @@ __global__ void mc_update_black(float * lat, curandState * states) {
       const size_t t3 = g3*Bi+b3;
       
       // Array index (TODO: move this outside of the loop)
-      const size_t parity = (t0 + t1 + t2 + t3) & 1; // 0 if t0+t1+t2+t3 even, 1 otherwise
+      const size_t parity = (t1 + t2 + t3) & 1; // 0 if t1+t2+t3 even, 1 otherwise
       const size_t Idx = 2*t0+1 + S1*(t1+1) + S2*(t2+1) + S3*(t3+1) + parity;
 
       const float zeta = (2.0f*curand_uniform(&state) - 1.0f) * epsilon; // ζ ∈ [-ε,+ε]
@@ -434,8 +435,8 @@ void generate_single_conf() {
 
 __host__ int main() {
 
-  //generate_single_conf();
-  mc_average();
+  generate_single_conf();
+  // mc_average();
 
   return 0;
 }
