@@ -4,7 +4,7 @@
 #include <utility>
 #include <cassert>
 #include <cstdio>
-// #include "H5Cpp.h"
+#include "H5Cpp.h"
 
 /******************************************************************************/
 
@@ -12,8 +12,8 @@
 // =====================
 
 // Block size
-constexpr size_t B0 = 4;
-constexpr size_t Bi = 4;
+constexpr size_t B0 = 8;
+constexpr size_t Bi = 8;
 // Number of threads 8³ = 512
 // Loop over the last dimension
 // Shared memory usage: 44000o including halos.
@@ -21,7 +21,7 @@ constexpr size_t Bi = 4;
 
 // Grid size
 constexpr size_t G0 = 1;
-constexpr size_t Gi = 1;
+constexpr size_t Gi = 2;
   
 // Lattice size
 constexpr size_t N0 = B0*G0;
@@ -38,21 +38,21 @@ constexpr size_t S2 = M0*Mi;
 constexpr size_t S3 = M0*Mi*Mi;
 
 // Lattice spacing
-constexpr float a = 0.5f;
+constexpr float a = 1.0f;
 
 // Physical parameters
-constexpr float m2 = 1.0f;
+constexpr float m2 = 0.25f;
 constexpr float lambda = 1.0f;
 
 // Monte-Carlo parameters
-constexpr unsigned int N_cor = 1;
+constexpr unsigned int N_cor = 30;
 constexpr unsigned int N_cf  = 100;
-constexpr unsigned int N_th  = 1;
-constexpr float epsilon = 0.7f;
+constexpr unsigned int N_th  = 10*N_cor;
+constexpr float epsilon = 1.0f;
 
 // Output
-// const H5std_string file_name("correlations.h5");
-// const H5std_string dataset_name("corr");
+const H5std_string file_name("correlations.h5");
+const H5std_string dataset_name("corr");
 
 /******************************************************************************/
 
@@ -366,7 +366,7 @@ __host__ void mc_average() {
   fprintf(stderr, " done in %fs.\n", 1e-3*ms);
 
   // Run Metropolis algorithm
-  fprintf(stderr, "Running mc...");
+  fprintf(stderr, "Running MC...");
   cudaEventRecord(start);
   for (size_t i = 0 ; i < N_cf ; ++i) {
     // Drop N_cor iterations to damp correlations between successive configurations.
@@ -375,7 +375,6 @@ __host__ void mc_average() {
     }
     fprintf(stderr, " %d", i);
     // Compute the euclidean time correlations within one configuration.
-    // Compute_correlations(lat_old, corr, i, corr_buf_h, corr_buf_d);
   }
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
@@ -437,8 +436,8 @@ void generate_single_conf() {
 
 __host__ int main() {
 
-  generate_single_conf();
-  // mc_average();
+  // generate_single_conf();
+  mc_average();
 
   return 0;
 }
