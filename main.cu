@@ -298,7 +298,12 @@ void mc_update(float* lat, curandState * states) {
   exchange_faces(lat);
 }
 
-__host__ void init_lattice(float ** lat, curandState ** states) {
+// Resource management
+// -------------------
+
+__host__ float* new_lattice() {
+
+  float * lat = nullptr;
 
   fprintf(stderr, "Lattice: (%d,%d,%d,%d)\n", N0, Ni, Ni, Ni);
   fprintf(stderr, "Array:   (%d,%d,%d,%d)\n", M0, Mi, Mi, Mi);
@@ -307,37 +312,52 @@ __host__ void init_lattice(float ** lat, curandState ** states) {
   fprintf(stderr, "Allocating lattice array...\n");
   // Allocate lattice on device
   fprintf(stderr, "Requesting %d bytes...", M_bytes);
-  assert(cudaMalloc(lat, M_bytes) == cudaSuccess);
+  assert(cudaMalloc(&lat, M_bytes) == cudaSuccess);
   fprintf(stderr, " done.\n");
   fprintf(stderr, "Memset'ting to 0...");
-  assert(cudaMemset(*lat, 0., M_count) == cudaSuccess);
+  assert(cudaMemset(lat, 0., M_count) == cudaSuccess);
   fprintf(stderr, " done.\n");
+
+  return lat;
+}
+
+__host__ void delete_lattice(float ** lat) {
+
+  assert(cudaFree(*lat) == cudaSuccess);
+  *lat = nullptr;
+}
+
+__host__ curandState* new_rng() {
+
+  curandState * states;
 
   // Seed RNG on each thread
   fprintf(stderr, "Allocating RNG...\n");
   fprintf(stderr, "Requesting %d bytes...", N0/2*Ni*Ni*sizeof(curandState));
-  assert(cudaMalloc(states, N0/2*Ni*Ni*sizeof(curandState)) == cudaSuccess);
+  assert(cudaMalloc(&states, N0/2*Ni*Ni*sizeof(curandState)) == cudaSuccess);
   fprintf(stderr, " done.\n");
   fprintf(stderr, "Initializing RNG...");
-  rng_init<<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(clock(), *states);
+  rng_init<<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(clock(), states);
   assert(cudaDeviceSynchronize() == cudaSuccess);
   fprintf(stderr, " done.\n");
+
+  return states;
 }
 
-__host__ void free_lattice(float ** lat, curandState ** states) {
+__host__ void delete_rng(curandState ** states) {
 
-  cudaFree(*lat);
-  cudaFree(*states);
-  *lat    = nullptr;
+  assert(cudaFree(*states) == cudaSuccess);
   *states = nullptr;
 }
 
-// Compute the space-average of the time-slice correlator value over many configurations.
-__host__ void mc_average() {
+// Main algorithm
+// --------------
 
-  float * lat = nullptr;
-  curandState * states = nullptr;
-  init_lattice(&lat, &states);
+// Compute the space-average of the time-slice correlator value over many configurations.
+__host__ void mc_average(const size_t N_cf = N_cf, const size_t N_cor = N_cor, const size_t N_th = N_th) {
+
+  auto lat = new_lattice();
+  auto states = new_rng();
 
   // Allocate memory used to store correlation data
   // Host-side buffer
@@ -392,7 +412,8 @@ __host__ void mc_average() {
   fprintf(stderr, "Finalization...");
 
   // Free device memory
-  free_lattice(&lat, &states);
+  delete_lattice(&lat);
+  delete_rng(&states);
   cudaFree(corr_buf_d);
   corr_buf_d = nullptr;
 
@@ -404,11 +425,8 @@ __host__ void mc_average() {
   fprintf(stderr, " done.\n");
 }
 
-void generate_single_conf() {
-
-  float * lat = nullptr;
-  curandState * states = nullptr;
-  init_lattice(&lat, &states);
+void thermalize_conf(float * lat, curandState * states, const size_t N_th = N_th,
+                     const bool verbose = false, const size_t poll = 1) {
 
   // Thermalize lattice
   cudaEvent_t start, stop;
@@ -416,28 +434,55 @@ void generate_single_conf() {
   cudaEventCreate(&stop);
   fprintf(stderr, "Thermalizing lattice...");
   cudaEventRecord(start);
-  for (size_t i = 0 ; i < N_th ; ++i) {
+  for (size_t i = 1 ; i <= N_th ; ++i) {
     mc_update<dS>(lat, states);
+    if (verbose && i % poll == 0) {
+      fprintf(stderr, " %llu", i);
+    }
   }
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   float ms;
   cudaEventElapsedTime(&ms, start, stop);
   fprintf(stderr, " done in %fs.\n", 1e-3*ms);
+}
 
-  // Write result to file
-  // write_configuration(lat_old);
+// TODO – Generates one configuration and computes the histogram of its values
+void bin_single_conf(const size_t N_th = N_th) {
+
+  auto lat = new_lattice();
+  auto states = new_rng();
+
+  thermalize_conf(lat, states, N_th, true, 1000);
+
+  // TODO – Compute histogram here
 
   fprintf(stderr, "Finalization...");
   // Free device memory
-  free_lattice(&lat, &states);
+  delete_lattice(&lat);
+  delete_rng(&states);
   fprintf(stderr, " done.\n");
+}
+
+// Computes the mean of a single configuration
+void single_conf_mean(const size_t N_th = N_th, const bool verbose = false, const size_t poll = 1) {
+
+  auto lat = new_lattice();
+  auto states = new_rng();
+
+  thermalize_conf(lat, states, N_th, verbose, poll);
+
+  // TODO – Compute mean here
+
+  delete_lattice(&lat);
+  delete_rng(&states);
 }
 
 __host__ int main() {
 
-  // generate_single_conf();
-  mc_average();
+  // bin_single_conf(20000);
+  // mc_average();
+  single_conf_mean(20000, true, 1000);
 
   return 0;
 }
