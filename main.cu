@@ -46,8 +46,8 @@ constexpr size_t S3 = M0*Mi*Mi;
 constexpr float a = 1.0f;
 
 // Physical parameters
-constexpr float m2 = 0.25f;
-constexpr float lambda = 1.0f;
+constexpr float m2 = -1.0f;
+constexpr float lambda = 0.01f;
 
 // Monte-Carlo parameters
 constexpr unsigned int N_cor = 30;
@@ -94,7 +94,7 @@ __device__ float delta_S_phi4(float * f, const size_t Idx, const float zeta) {
 }
 
 // Choice of the action used in the simulation
-constexpr auto dS = delta_S_free;
+constexpr auto dS = delta_S_phi4;
 
 /******************************************************************************/
 
@@ -217,10 +217,18 @@ __global__ void mc_update_white(float * lat, curandState * states) {
   states[tid] = state;
 }
 
-// Initialize rng state
+/*
+ * Initialize RNG state
+ *
+ * Grid size: (G0,Gi,Gi)
+ * Block size: (N0/2,Ni,Ni)
+ */
 __global__ void rng_init(unsigned long long seed, curandState * states) {
 
-  const size_t Idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t I0 = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t I1 = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t I2 = blockIdx.z * blockDim.z + threadIdx.z;
+  const size_t Idx = I0 + (N0>>1)*I1 + (N0*Ni>>1)*I2;
   curand_init(seed, Idx, 0, &states[Idx]);
 }
 
@@ -355,9 +363,7 @@ template <float (*delta_S)(float*, const size_t, const float)>
 void mc_update(float* lat, curandState * states) {
 
   mc_update_black<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states);
-  cudaDeviceSynchronize();
   mc_update_white<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states);
-  cudaDeviceSynchronize();
   exchange_faces(lat);
 }
 
@@ -567,7 +573,7 @@ __host__ int main() {
 
   // bin_single_conf(20000);
   // mc_average();
-  single_conf_mean(10000, true, 1000);
+  single_conf_mean(1000, true, 50);
 
   return 0;
 }
