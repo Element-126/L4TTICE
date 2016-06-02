@@ -1,10 +1,15 @@
+// CUDA
 #include <cuda.h>
 #include <curand.h>
 #include <curand_kernel.h>
+// Standard library
 #include <utility>
 #include <cassert>
 #include <cstdio>
+// HDF5
 #include "H5Cpp.h"
+// CUB
+#include <cub/cub.cuh>
 
 /******************************************************************************/
 
@@ -219,6 +224,64 @@ __global__ void rng_init(unsigned long long seed, curandState * states) {
   curand_init(seed, Idx, 0, &states[Idx]);
 }
 
+/*
+ * Set the 3d halos to zero so they do not affect the reduction
+ *
+ * Can be undone by calling exchange_faces
+ */
+__global__ void erase_halos_0(float * lat) {
+
+  const size_t I1 = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  const size_t I2 = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  const size_t I3 = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  const size_t Idx = S1*I1 + S2*I2 + S3*I3;
+
+  lat[Idx         ] = 0.0f;
+  lat[Idx + (N0+1)] = 0.0f;
+}
+
+__global__ void erase_halos_1(float * lat) {
+
+  const size_t I0 = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  const size_t I2 = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  const size_t I3 = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  const size_t Idx = I0 + S2*I2 + S3*I3;
+
+  lat[Idx            ] = 0.0f;
+  lat[Idx + S1*(Ni+1)] = 0.0f;
+}
+
+__global__ void erase_halos_2(float * lat) {
+
+  const size_t I0 = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  const size_t I1 = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  const size_t I3 = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  const size_t Idx = I0 + S1*I1 + S3*I3;
+
+  lat[Idx            ] = 0.0f;
+  lat[Idx + S2*(Ni+1)] = 0.0f;
+}
+
+__global__ void erase_halos_3(float * lat) {
+
+  const size_t I0 = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  const size_t I1 = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  const size_t I2 = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  const size_t Idx = I0 + S1*I1 + S2*I2;
+
+  lat[Idx            ] = 0.0f;
+  lat[Idx + S3*(Ni+1)] = 0.0f;
+}
+
+__host__ void erase_halos(float * lat) {
+
+  erase_halos_0<<<dim3(Gi,Gi,Gi),dim3(Bi,Bi,Bi)>>>(lat);
+  erase_halos_1<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
+  erase_halos_2<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
+  erase_halos_3<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
+  assert(cudaDeviceSynchronize() == cudaSuccess);
+}
+
 /******************************************************************************/
 
 // Exchange of the 3d "faces" of the 4d lattice
@@ -279,7 +342,7 @@ __host__ void exchange_faces(float * lat) {
   exchange_faces_1<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
   exchange_faces_2<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
   exchange_faces_3<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
-  cudaDeviceSynchronize();
+  assert(cudaDeviceSynchronize() == cudaSuccess);
 }
 
 /******************************************************************************/
@@ -448,21 +511,21 @@ void thermalize_conf(float * lat, curandState * states, const size_t N_th = N_th
 }
 
 // TODO – Generates one configuration and computes the histogram of its values
-void bin_single_conf(const size_t N_th = N_th) {
+// void bin_single_conf(const size_t N_th = N_th) {
 
-  auto lat = new_lattice();
-  auto states = new_rng();
+//   auto lat = new_lattice();
+//   auto states = new_rng();
 
-  thermalize_conf(lat, states, N_th, true, 1000);
+//   thermalize_conf(lat, states, N_th, true, 1000);
 
-  // TODO – Compute histogram here
+//   // TODO – Compute histogram here
 
-  fprintf(stderr, "Finalization...");
-  // Free device memory
-  delete_lattice(&lat);
-  delete_rng(&states);
-  fprintf(stderr, " done.\n");
-}
+//   fprintf(stderr, "Finalization...");
+//   // Free device memory
+//   delete_lattice(&lat);
+//   delete_rng(&states);
+//   fprintf(stderr, " done.\n");
+// }
 
 // Computes the mean of a single configuration
 void single_conf_mean(const size_t N_th = N_th, const bool verbose = false, const size_t poll = 1) {
@@ -472,17 +535,39 @@ void single_conf_mean(const size_t N_th = N_th, const bool verbose = false, cons
 
   thermalize_conf(lat, states, N_th, verbose, poll);
 
-  // TODO – Compute mean here
+  // Set halos to 0 in order not to interfere with the reduction
+  erase_halos(lat);
+
+  //Prepare resources for CUB
+  float * sum_d = nullptr;
+  assert(cudaMalloc(&sum_d, sizeof(float)) == cudaSuccess);
+  void * cub_tmp_storage = nullptr;
+  size_t cub_tmp_bytes = 0;
+  cub::CachingDeviceAllocator g_allocator(true);
+  // Run once to initialize resources
+  CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
+  CubDebugExit(g_allocator.DeviceAllocate(&cub_tmp_storage, cub_tmp_bytes));
+  // Actually run the summation
+  CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
+  // Retreive the result
+  float * sum_h = (float*) malloc(sizeof(float));
+  assert(sum_h);
+  cudaMemcpy(sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost);
+
+  fprintf(stderr, "Mean: %f\n", *sum_h / (N0*Ni*Ni*Ni));
 
   delete_lattice(&lat);
   delete_rng(&states);
+  cudaFree(sum_d);
+  free(sum_h);
+  CubDebugExit(g_allocator.DeviceFree(cub_tmp_storage));
 }
 
 __host__ int main() {
 
   // bin_single_conf(20000);
   // mc_average();
-  single_conf_mean(20000, true, 1000);
+  single_conf_mean(10000, true, 1000);
 
   return 0;
 }
