@@ -45,11 +45,8 @@ constexpr size_t S2 = M0*Mi;
 constexpr size_t S3 = M0*Mi*Mi;
 
 // Physical parameters
-constexpr float m2 = -1.0f;
-constexpr float lambda = 0.01f;
-
-// Monte-Carlo parameters
-constexpr float epsilon = 1.0f;
+constexpr float m2 = -1./8.;
+constexpr float lambda = 1./32.;
 
 /******************************************************************************/
 
@@ -101,7 +98,8 @@ constexpr auto dS = delta_S_phi4;
  *  Gridsize should be (G0,Gi,Gi) and grid stride Gi
  */ 
 template<float (*delta_S)(float*, const size_t, const float, const float)>
-__global__ void mc_update_black(float * lat, curandState * states, const float a) {
+__global__ void mc_update_black(float * lat, curandState * states,
+                                const float a, const float epsilon) {
 
   // Global thread index
   const size_t t0 = blockIdx.x * blockDim.x + threadIdx.x;
@@ -171,7 +169,8 @@ __global__ void mc_update_black(float * lat, curandState * states, const float a
  *  Same grid and block sizes as for black indices.
  */
 template<float (*delta_S)(float*, const size_t, const float, const float)>
-__global__ void mc_update_white(float * lat, curandState * states, const float a) {
+__global__ void mc_update_white(float * lat, curandState * states,
+                                const float a, const float epsilon) {
 
   // Global thread index
   const size_t t0 = blockIdx.x * blockDim.x + threadIdx.x;
@@ -350,10 +349,10 @@ __host__ void update_halos(float * lat) {
 
 // Perform one Monte-Carlo iteration
 template <float (*delta_S)(float*, const size_t, const float, const float a)>
-void mc_update(float* lat, curandState * states, const float a) {
+void mc_update(float* lat, curandState * states, const float a, const float epsilon) {
 
-  mc_update_black<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states, a);
-  mc_update_white<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states, a);
+  mc_update_black<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states, a, epsilon);
+  mc_update_white<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states, a, epsilon);
   update_halos(lat);
 }
 
@@ -420,82 +419,15 @@ __host__ void delete_rng(curandState ** states) {
   *states = nullptr;
 }
 
-// Main algorithm
-// --------------
-
-// Compute the space-average of the time-slice correlator value over many configurations.
-__host__ void mc_average(const size_t N_cf, const size_t N_cor, const size_t N_th, const float a) {
-
-  auto lat = new_lattice();
-  auto states = new_rng();
-
-  // Allocate memory used to store correlation data
-  // Host-side buffer
-  float * corr_buf_h = (float*) calloc(Ni*Ni*Ni, sizeof(float));
-  assert(corr_buf_h);
-  // Device-side buffer
-  float * corr_buf_d = nullptr;
-  assert(cudaMalloc(&corr_buf_d, Ni*Ni*Ni*sizeof(float)) == cudaSuccess);
-  // Array storing the final results
-  float * corr = (float*) calloc(N0*N_cf, sizeof(float));
-  assert(corr);
-
-  // Thermalize lattice
-  cudaEvent_t start, stop;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
-  fprintf(stderr, "Thermalizing lattice...");
-  cudaEventRecord(start);
-  for (size_t i = 0 ; i < N_th ; ++i) {
-    mc_update<dS>(lat, states, a);
-  }
-  cudaEventRecord(stop);
-  cudaEventSynchronize(stop);
-  float ms;
-  cudaEventElapsedTime(&ms, start, stop);
-  fprintf(stderr, " done in %fs.\n", 1e-3*ms);
-
-  // Run Metropolis algorithm
-  fprintf(stderr, "Running MC...");
-  cudaEventRecord(start);
-  for (size_t i = 0 ; i < N_cf ; ++i) {
-    // Drop N_cor iterations to damp correlations between successive configurations.
-    for (size_t j = 0 ; j < N_cor ; ++j) {
-      mc_update<dS>(lat, states, a);
-    }
-    fprintf(stderr, " %d", i);
-    // Compute the euclidean time correlations within one configuration.
-  }
-  cudaEventRecord(stop);
-  cudaEventSynchronize(stop);
-  cudaEventElapsedTime(&ms, start, stop);
-  fprintf(stderr, " done in %fs.\n", 1e-3*ms);
-
-  // Write output to file
-  // fprintf(stderr, "Writing to file...");
-  // write_correlations(corr);
-  // fprintf(stderr, " done.\n");
-  
-  // Finalization
-  // ============
-
-  fprintf(stderr, "Finalization...");
-
-  // Free device memory
-  delete_lattice(&lat);
-  delete_rng(&states);
-  cudaFree(corr_buf_d);
-  corr_buf_d = nullptr;
-
-  // Free host memory
-  free(corr_buf_h);
-  free(corr);
-  corr_buf_h = nullptr;
-  corr       = nullptr;
-  fprintf(stderr, " done.\n");
-}
-
-float thermalize_conf(float * lat, curandState * states, const float a, const size_t N_th,
+/*
+ * Thermalize a configuration
+ *
+ * a    = lattice spacing
+ * N_th = number of MC iterations to run
+ * ε    = uniform distribution parameter: [-ε,+ε]
+ */
+float thermalize_conf(float * lat, curandState * states,
+                      const float a, const size_t N_th, const float epsilon,
                       const bool verbose = false, const size_t poll = 1) {
 
   // Thermalize lattice
@@ -507,7 +439,7 @@ float thermalize_conf(float * lat, curandState * states, const float a, const si
   }
   cudaEventRecord(start);
   for (size_t i = 1 ; i <= N_th ; ++i) {
-    mc_update<dS>(lat, states, a);
+    mc_update<dS>(lat, states, a, epsilon);
     if (verbose && i % poll == 0) {
       fprintf(stderr, " %llu", i);
     }
@@ -536,8 +468,9 @@ float thermalize_conf(float * lat, curandState * states, const float a, const si
  *   filename = name of the file to write the output to
  *       If empty, nothing is written
  */
-void mc_mean(const size_t N_cf, const size_t N_th, const float a, float * out,
-             float * lat, curandState * states, float * sum_d, float * sum_h, void * cub_tmp_storage,
+void mc_mean(const size_t N_cf, const size_t N_th, const float a, const float epsilon,
+             float * out, float * lat, curandState * states,
+             float * sum_d, float * sum_h, void * cub_tmp_storage,
              size_t cub_tmp_bytes, const int verbose = 0, const size_t poll_th = 500) {
 
   for (size_t k = 0 ; k < N_cf ; ++k) {
@@ -546,7 +479,7 @@ void mc_mean(const size_t N_cf, const size_t N_th, const float a, float * out,
     if (verbose >= 2) {
       fprintf(stderr, "%.2llu: ", k+1);
     }
-    float time = thermalize_conf(lat, states, a, N_th, (verbose >= 2), poll_th);
+    float time = thermalize_conf(lat, states, a, N_th, epsilon, (verbose >= 2), poll_th);
     // Erase the halos in order not to interfere with the summation
     erase_halos(lat);
     // Actually run the summation
@@ -572,12 +505,17 @@ void mc_mean(const size_t N_cf, const size_t N_th, const float a, float * out,
 
 /*
  * For each inverse temperature β, generate N_cf configurations and compute their means.
+ *
+ * All vectors must have the same size.
  */
 void mc_mean_temp(const std::vector<float> beta, const std::vector<size_t> N_cf,
-                  const std::vector<size_t> N_th, const int verbose = 0, const size_t poll_th = 1000,
+                  const std::vector<size_t> N_th, const std::vector<float> epsilon,
+                  const int verbose = 0, const size_t poll_th = 1000,
                   const std::string filename = "") {
 
-  assert(beta.size() == N_cf.size() && beta.size() == N_th.size());
+  assert(beta.size() == N_cf.size());
+  assert(beta.size() == N_th.size());
+  assert(beta.size() == epsilon.size());
 
   /*
    * Allocate resources for the simulation
@@ -606,28 +544,28 @@ void mc_mean_temp(const std::vector<float> beta, const std::vector<size_t> N_cf,
   auto out = (float *) calloc(N_cf_tot*3, sizeof(float));
   auto cursor = out;
 
-  // Do computation
+  // Do the computations for each temperature
   (verbose > 0) && fprintf(stderr, "Running simulation...\n");
   for (size_t i = 0 ; i < beta.size() ; ++i) {
 
     (verbose > 0) && fprintf(stderr, ">>> β = %f\n", beta[i]);
-    mc_mean(N_cf[i], N_th[i], beta[i]/N0, cursor,
-            lat, states, sum_d, sum_h, cub_tmp_storage,
+    mc_mean(N_cf[i], N_th[i], beta[i]/N0, epsilon[i],
+            cursor, lat, states, sum_d, sum_h, cub_tmp_storage,
             cub_tmp_bytes, verbose, poll_th);
     cursor += N_cf[i]*3;
   }
   (verbose > 0) && fprintf(stderr, "...done\n");
 
-  (verbose > 0) && fprintf(stderr, "Writing to file...");
   if(!filename.empty()) {
     // Write results to file
+    (verbose > 0) && fprintf(stderr, "Writing to file...");
     H5::H5File file(filename, H5F_ACC_TRUNC);
     hsize_t dims[2] = {N_cf_tot, 3};
     H5::DataSpace dataspace(2, dims);
     H5::DataSet dataset = file.createDataSet("means", H5::PredType::NATIVE_FLOAT, dataspace);
     dataset.write(out, H5::PredType::NATIVE_FLOAT);
+    (verbose > 0) && fprintf(stderr, " done\n");
   }
-  (verbose > 0) && fprintf(stderr, " done\n");
 
   // Free resources
   (verbose > 0) && fprintf(stderr, "Freeing resources...");
@@ -640,13 +578,30 @@ void mc_mean_temp(const std::vector<float> beta, const std::vector<size_t> N_cf,
   (verbose > 0) && fprintf(stderr, " done\n");
 }
 
+__host__ void full_run() {
+
+  mc_mean_temp(std::vector<float>({8., 6., 5., 4., 3., 2.5, 2./*, 1.5, 1.25, 1.*/}),
+               std::vector<size_t>({128, 72, 48, 32, 16, 12, 8/*, 6, 4, 4*/}),
+               std::vector<size_t>({2000, 3500, 5000, 8000, 14000, 20000, 32000/*, 57000, 82000, 128000*/}),
+               std::vector<float>({1.0, 1.33, 1.6, 2.0, 2.67, 3.2, 4.0/*, 5.33, 6.4, 8.0*/}),
+               2, 2000,
+               "means.h5");
+}
+
+__host__ void benchmark() {
+
+  mc_mean_temp(std::vector<float>({8., 6., 4., 3.}),
+               std::vector<size_t>({24, 12, 8, 4}),
+               std::vector<size_t>({2000, 4000, 10000, 20000}),
+               std::vector<float>({1., 1.33, 2., 2.67}),
+               0, 0,
+               "out.h5");
+}
+
 __host__ int main() {
 
-  mc_mean_temp(std::vector<float>({8.0f, 4.0f, 2.0f}),
-               std::vector<size_t>({8,6,4}),
-               std::vector<size_t>({250,1000,10000}),
-               1, 1000,
-               "means.h5");
+  // full_run();
+  benchmark();
 
   return 0;
 }
