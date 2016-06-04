@@ -49,10 +49,6 @@ constexpr float lambda = 0.01f;
 // Monte-Carlo parameters
 constexpr float epsilon = 1.0f;
 
-// Output
-const H5std_string file_name("correlations.h5");
-const H5std_string dataset_name("corr");
-
 /******************************************************************************/
 
 // Variation of the action
@@ -485,14 +481,16 @@ __host__ void mc_average(const size_t N_cf, const size_t N_cor, const size_t N_t
   fprintf(stderr, " done.\n");
 }
 
-void thermalize_conf(float * lat, curandState * states, const float a, const size_t N_th,
-                     const bool verbose = false, const size_t poll = 1) {
+float thermalize_conf(float * lat, curandState * states, const float a, const size_t N_th,
+                      const bool verbose = false, const size_t poll = 1) {
 
   // Thermalize lattice
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
-  fprintf(stderr, "Thermalizing lattice...");
+  if (verbose) {
+    fprintf(stderr, "Thermalizing lattice...");
+  }
   cudaEventRecord(start);
   for (size_t i = 1 ; i <= N_th ; ++i) {
     mc_update<dS>(lat, states, a);
@@ -504,7 +502,10 @@ void thermalize_conf(float * lat, curandState * states, const float a, const siz
   cudaEventSynchronize(stop);
   float ms;
   cudaEventElapsedTime(&ms, start, stop);
-  fprintf(stderr, " done in %fs.\n", 1e-3*ms);
+  if (verbose) {
+    fprintf(stderr, " done in %fs.\n", 1e-3*ms);
+  }
+  return ms*1e-3;
 }
 
 /*
@@ -516,15 +517,26 @@ void thermalize_conf(float * lat, curandState * states, const float a, const siz
  *   a    = lattice spacing
  *
  * Optional parameters:
- *   verbose = whether to print the current status to stderr
- *   poll_th = number of MC updates between status updates
+ *   verbose  = whether to print the current status to stderr
+ *   poll_th  = number of MC updates between status updates
+ *   filename = name of the file to write the output to
+ *       If empty, nothing is written
  */
 void mc_mean(const size_t N_cf, const size_t N_th, const float a,
-             const bool verbose = false, const size_t poll_th = 500) {
+             const bool verbose = false, const size_t poll_th = 500, const std::string filename = "") {
 
+  const bool save_out = !filename.empty();
+  
   // Allocate resources for the simulation
   auto lat = new_lattice();
   auto states = new_rng();
+
+  /*
+   * Allocate output array
+   *
+   * Columns: β | mean | time
+   */
+  auto out = (float *) calloc(3*N_cf, sizeof(float));
 
   //Prepare resources for CUB
   float * sum_d = nullptr;
@@ -538,10 +550,13 @@ void mc_mean(const size_t N_cf, const size_t N_th, const float a,
   CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
   CubDebugExit(g_allocator.DeviceAllocate(&cub_tmp_storage, cub_tmp_bytes));
 
-  for (size_t k = 1 ; k <= N_cf ; ++k) {
+  for (size_t k = 0 ; k < N_cf ; ++k) {
 
     // Thermalize the configuration
-    thermalize_conf(lat, states, a, N_th, verbose, poll_th);
+    if (verbose) {
+      fprintf(stderr, "%.2llu: ", k);
+    }
+    float time = thermalize_conf(lat, states, a, N_th, verbose, poll_th);
     // Erase the halos in order not to interfere with the summation
     erase_halos(lat);
     // Actually run the summation
@@ -550,10 +565,27 @@ void mc_mean(const size_t N_cf, const size_t N_th, const float a,
     CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
     // Retreive the result
     assert(cudaMemcpy(sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess);
+    float mean = *sum_h / (N0*Ni*Ni*Ni);
     // Reset the lattice to zero for the next run
     assert(cudaMemset(lat, 0.0f, M_bytes) == cudaSuccess);
-    // Print the result
-    fprintf(stderr, "%llu: Mean = %f\n", k, *sum_h / (N0*Ni*Ni*Ni));
+    // if (verbose == true) {
+    //   // Print the result
+    //   fprintf(stderr, "%llu: Mean = %f\n", k+1, mean);
+    // }
+    if (save_out) {
+      out[k         ] = N0*a;
+      out[k +   N_cf] = mean;
+      out[k + 2*N_cf] = time;
+    }
+  }
+
+  if (save_out) {
+    // Write results to file
+    H5::H5File file(filename, H5F_ACC_TRUNC);
+    hsize_t dims[2] = {3, N_cf};
+    H5::DataSpace dataspace(2, dims);
+    H5::DataSet dataset = file.createDataSet("means", H5::PredType::NATIVE_FLOAT, dataspace);
+    dataset.write(out, H5::PredType::NATIVE_FLOAT);
   }
 
   // Free resources
@@ -562,11 +594,12 @@ void mc_mean(const size_t N_cf, const size_t N_th, const float a,
   cudaFree(sum_d);
   free(sum_h);
   CubDebugExit(g_allocator.DeviceFree(cub_tmp_storage));
+  free(out);
 }
 
 __host__ int main() {
 
-  mc_mean(8, 5000, 1.0f, true, 1000);
+  mc_mean(16, 5000, 1.0f, true, 1000, "means.h5");
 
   return 0;
 }
