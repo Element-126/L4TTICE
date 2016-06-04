@@ -6,6 +6,8 @@
 #include <utility>
 #include <cassert>
 #include <cstdio>
+#include <vector>
+#include <numeric>
 // HDF5
 #include "H5Cpp.h"
 // CUB
@@ -358,22 +360,28 @@ void mc_update(float* lat, curandState * states, const float a) {
 // Resource management
 // -------------------
 
-__host__ float* new_lattice() {
+__host__ float* new_lattice(const bool verbose = false) {
 
   float * lat = nullptr;
 
-  fprintf(stderr, "Lattice: (%d,%d,%d,%d)\n", N0, Ni, Ni, Ni);
-  fprintf(stderr, "Array:   (%d,%d,%d,%d)\n", M0, Mi, Mi, Mi);
-  fprintf(stderr, "M_count = %d\n", M_count);
+  if (verbose) {
+    fprintf(stderr, "Lattice: (%d,%d,%d,%d)\n", N0, Ni, Ni, Ni);
+    fprintf(stderr, "Array:   (%d,%d,%d,%d)\n", M0, Mi, Mi, Mi);
+    fprintf(stderr, "M_count = %d\n", M_count);
   
-  fprintf(stderr, "Allocating lattice array...\n");
+    fprintf(stderr, "Allocating lattice array...\n");
+    fprintf(stderr, "Requesting %d bytes...", M_bytes);
+  }
   // Allocate lattice on device
-  fprintf(stderr, "Requesting %d bytes...", M_bytes);
   assert(cudaMalloc(&lat, M_bytes) == cudaSuccess);
-  fprintf(stderr, " done.\n");
-  fprintf(stderr, "Memset'ting to 0...");
+  if (verbose) {
+    fprintf(stderr, " done.\n");
+    fprintf(stderr, "Memset'ting to 0...");
+  }
   assert(cudaMemset(lat, 0.0f, M_count) == cudaSuccess);
-  fprintf(stderr, " done.\n");
+  if (verbose) {
+    fprintf(stderr, " done.\n");
+  }
 
   return lat;
 }
@@ -384,18 +392,24 @@ __host__ void delete_lattice(float ** lat) {
   *lat = nullptr;
 }
 
-__host__ curandState* new_rng() {
+__host__ curandState* new_rng(const bool verbose = false) {
 
   curandState * states;
 
   // Seed RNG on each thread
-  fprintf(stderr, "Allocating RNG...\n");
-  fprintf(stderr, "Requesting %d bytes...", N0/2*Ni*Ni*sizeof(curandState));
+  if (verbose) {
+    fprintf(stderr, "Allocating RNG...\n");
+    fprintf(stderr, "Requesting %d bytes...", N0/2*Ni*Ni*sizeof(curandState));
+  }
   assert(cudaMalloc(&states, N0/2*Ni*Ni*sizeof(curandState)) == cudaSuccess);
-  fprintf(stderr, " done.\n");
-  fprintf(stderr, "Initializing RNG...");
+  if (verbose) {
+    fprintf(stderr, " done.\n");
+    fprintf(stderr, "Initializing RNG...");
+  }
   rng_init<<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(clock(), states);
-  fprintf(stderr, " done.\n");
+  if (verbose) {
+    fprintf(stderr, " done.\n");
+  }
 
   return states;
 }
@@ -517,26 +531,59 @@ float thermalize_conf(float * lat, curandState * states, const float a, const si
  *   a    = lattice spacing
  *
  * Optional parameters:
- *   verbose  = whether to print the current status to stderr
+ *   verbose  = verbosity level (0: nothing | 1: debug | 2: display progress | 3: print result)
  *   poll_th  = number of MC updates between status updates
  *   filename = name of the file to write the output to
  *       If empty, nothing is written
  */
-void mc_mean(const size_t N_cf, const size_t N_th, const float a,
-             const bool verbose = false, const size_t poll_th = 500, const std::string filename = "") {
+void mc_mean(const size_t N_cf, const size_t N_th, const float a, float * out,
+             float * lat, curandState * states, float * sum_d, float * sum_h, void * cub_tmp_storage,
+             size_t cub_tmp_bytes, const int verbose = 0, const size_t poll_th = 500) {
 
-  const bool save_out = !filename.empty();
-  
-  // Allocate resources for the simulation
-  auto lat = new_lattice();
-  auto states = new_rng();
+  for (size_t k = 0 ; k < N_cf ; ++k) {
+
+    // Thermalize the configuration
+    if (verbose >= 2) {
+      fprintf(stderr, "%.2llu: ", k+1);
+    }
+    float time = thermalize_conf(lat, states, a, N_th, (verbose >= 2), poll_th);
+    // Erase the halos in order not to interfere with the summation
+    erase_halos(lat);
+    // Actually run the summation
+    *sum_h = 0.0f;
+    assert(cudaMemset(sum_d, 0.0f, 1) == cudaSuccess);
+    CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
+    // Retreive the result
+    assert(cudaMemcpy(sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess);
+    float mean = *sum_h / (N0*Ni*Ni*Ni);
+    // Reset the lattice to zero for the next run
+    assert(cudaMemset(lat, 0.0f, M_bytes) == cudaSuccess);
+    if (verbose >= 3) {
+      // Print the result
+      fprintf(stderr, "Mean = %f\n", mean);
+    }
+    if (out) {
+      out[3*k    ] = N0*a;
+      out[3*k + 1] = mean;
+      out[3*k + 2] = time;
+    }
+  }
+}
+
+/*
+ * For each inverse temperature β, generate N_cf configurations and compute their means.
+ */
+void mc_mean_temp(const std::vector<float> beta, const std::vector<size_t> N_cf,
+                  const std::vector<size_t> N_th, const int verbose = 0, const size_t poll_th = 1000,
+                  const std::string filename = "") {
+
+  assert(beta.size() == N_cf.size() && beta.size() == N_th.size());
 
   /*
-   * Allocate output array
-   *
-   * Columns: β | mean | time
+   * Allocate resources for the simulation
    */
-  auto out = (float *) calloc(3*N_cf, sizeof(float));
+  auto lat = new_lattice(verbose > 0);
+  auto states = new_rng(verbose > 0);
 
   //Prepare resources for CUB
   float * sum_d = nullptr;
@@ -549,57 +596,57 @@ void mc_mean(const size_t N_cf, const size_t N_th, const float a,
   // Call once to initialize resources
   CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
   CubDebugExit(g_allocator.DeviceAllocate(&cub_tmp_storage, cub_tmp_bytes));
+  
+  /*
+   * Allocate output array
+   *
+   * Columns: β | mean | time
+   */
+  const size_t N_cf_tot = std::accumulate(N_cf.begin(), N_cf.end(), 0);
+  auto out = (float *) calloc(N_cf_tot*3, sizeof(float));
+  auto cursor = out;
 
-  for (size_t k = 0 ; k < N_cf ; ++k) {
+  // Do computation
+  (verbose > 0) && fprintf(stderr, "Running simulation...\n");
+  for (size_t i = 0 ; i < beta.size() ; ++i) {
 
-    // Thermalize the configuration
-    if (verbose) {
-      fprintf(stderr, "%.2llu: ", k);
-    }
-    float time = thermalize_conf(lat, states, a, N_th, verbose, poll_th);
-    // Erase the halos in order not to interfere with the summation
-    erase_halos(lat);
-    // Actually run the summation
-    *sum_h = 0.0f;
-    assert(cudaMemset(sum_d, 0.0f, 1) == cudaSuccess);
-    CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
-    // Retreive the result
-    assert(cudaMemcpy(sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess);
-    float mean = *sum_h / (N0*Ni*Ni*Ni);
-    // Reset the lattice to zero for the next run
-    assert(cudaMemset(lat, 0.0f, M_bytes) == cudaSuccess);
-    // if (verbose == true) {
-    //   // Print the result
-    //   fprintf(stderr, "%llu: Mean = %f\n", k+1, mean);
-    // }
-    if (save_out) {
-      out[k         ] = N0*a;
-      out[k +   N_cf] = mean;
-      out[k + 2*N_cf] = time;
-    }
+    (verbose > 0) && fprintf(stderr, ">>> β = %f\n", beta[i]);
+    mc_mean(N_cf[i], N_th[i], beta[i]/N0, cursor,
+            lat, states, sum_d, sum_h, cub_tmp_storage,
+            cub_tmp_bytes, verbose, poll_th);
+    cursor += N_cf[i]*3;
   }
+  (verbose > 0) && fprintf(stderr, "...done\n");
 
-  if (save_out) {
+  (verbose > 0) && fprintf(stderr, "Writing to file...");
+  if(!filename.empty()) {
     // Write results to file
     H5::H5File file(filename, H5F_ACC_TRUNC);
-    hsize_t dims[2] = {3, N_cf};
+    hsize_t dims[2] = {N_cf_tot, 3};
     H5::DataSpace dataspace(2, dims);
     H5::DataSet dataset = file.createDataSet("means", H5::PredType::NATIVE_FLOAT, dataspace);
     dataset.write(out, H5::PredType::NATIVE_FLOAT);
   }
+  (verbose > 0) && fprintf(stderr, " done\n");
 
   // Free resources
+  (verbose > 0) && fprintf(stderr, "Freeing resources...");
   delete_lattice(&lat);
   delete_rng(&states);
   cudaFree(sum_d);
   free(sum_h);
   CubDebugExit(g_allocator.DeviceFree(cub_tmp_storage));
   free(out);
+  (verbose > 0) && fprintf(stderr, " done\n");
 }
 
 __host__ int main() {
 
-  mc_mean(16, 5000, 1.0f, true, 1000, "means.h5");
+  mc_mean_temp(std::vector<float>({8.0f, 4.0f, 2.0f}),
+               std::vector<size_t>({8,6,4}),
+               std::vector<size_t>({250,1000,10000}),
+               1, 1000,
+               "means.h5");
 
   return 0;
 }
