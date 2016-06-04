@@ -384,7 +384,8 @@ __host__ float* new_lattice() {
   assert(cudaMalloc(&lat, M_bytes) == cudaSuccess);
   fprintf(stderr, " done.\n");
   fprintf(stderr, "Memset'ting to 0...");
-  assert(cudaMemset(lat, 0., M_count) == cudaSuccess);
+  assert(cudaMemset(lat, 0.0f, M_count) == cudaSuccess);
+  assert(cudaDeviceSynchronize() == cudaSuccess);
   fprintf(stderr, " done.\n");
 
   return lat;
@@ -516,33 +517,14 @@ void thermalize_conf(float * lat, curandState * states, const size_t N_th = N_th
   fprintf(stderr, " done in %fs.\n", 1e-3*ms);
 }
 
-// TODO – Generates one configuration and computes the histogram of its values
-// void bin_single_conf(const size_t N_th = N_th) {
+/*
+ * Generate N_cf configurations, thermalize them and compute their means.
+ */
+void mc_mean(const size_t N_cf, const size_t N_th, const bool verbose = false, const size_t poll_cf = 1, const size_t poll_th = 500) {
 
-//   auto lat = new_lattice();
-//   auto states = new_rng();
-
-//   thermalize_conf(lat, states, N_th, true, 1000);
-
-//   // TODO – Compute histogram here
-
-//   fprintf(stderr, "Finalization...");
-//   // Free device memory
-//   delete_lattice(&lat);
-//   delete_rng(&states);
-//   fprintf(stderr, " done.\n");
-// }
-
-// Computes the mean of a single configuration
-void single_conf_mean(const size_t N_th = N_th, const bool verbose = false, const size_t poll = 1) {
-
+  // Allocate resources for the simulation
   auto lat = new_lattice();
   auto states = new_rng();
-
-  thermalize_conf(lat, states, N_th, verbose, poll);
-
-  // Set halos to 0 in order not to interfere with the reduction
-  erase_halos(lat);
 
   //Prepare resources for CUB
   float * sum_d = nullptr;
@@ -550,18 +532,32 @@ void single_conf_mean(const size_t N_th = N_th, const bool verbose = false, cons
   void * cub_tmp_storage = nullptr;
   size_t cub_tmp_bytes = 0;
   cub::CachingDeviceAllocator g_allocator(true);
-  // Run once to initialize resources
-  CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
-  CubDebugExit(g_allocator.DeviceAllocate(&cub_tmp_storage, cub_tmp_bytes));
-  // Actually run the summation
-  CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
-  // Retreive the result
   float * sum_h = (float*) malloc(sizeof(float));
   assert(sum_h);
-  cudaMemcpy(sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost);
+  // Call once to initialize resources
+  CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
+  CubDebugExit(g_allocator.DeviceAllocate(&cub_tmp_storage, cub_tmp_bytes));
 
-  fprintf(stderr, "Mean: %f\n", *sum_h / (N0*Ni*Ni*Ni));
+  for (size_t k = 1 ; k <= N_cf ; ++k) {
 
+    // Thermalize the configuration
+    thermalize_conf(lat, states, N_th, verbose, poll_th);
+    // Erase the halos in order not to interfere with the summation
+    erase_halos(lat);
+    // Actually run the summation
+    *sum_h = 0.0f;
+    assert(cudaMemset(sum_d, 0.0f, 1) == cudaSuccess);
+    assert(cudaDeviceSynchronize() == cudaSuccess);
+    CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
+    // Retreive the result
+    assert(cudaMemcpy(sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess);
+    // Reset the lattice to zero for the next run
+    assert(cudaMemset(lat, 0.0f, M_bytes) == cudaSuccess);
+    // Print the result
+    fprintf(stderr, "%llu: Mean = %f\n", k, *sum_h / (N0*Ni*Ni*Ni));
+  }
+
+  // Free resources
   delete_lattice(&lat);
   delete_rng(&states);
   cudaFree(sum_d);
@@ -571,9 +567,7 @@ void single_conf_mean(const size_t N_th = N_th, const bool verbose = false, cons
 
 __host__ int main() {
 
-  // bin_single_conf(20000);
-  // mc_average();
-  single_conf_mean(1000, true, 50);
+  mc_mean(8, 5000, true, 1, 1000);
 
   return 0;
 }
