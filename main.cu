@@ -287,7 +287,6 @@ __host__ void erase_halos(float * lat) {
   erase_halos_1<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
   erase_halos_2<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
   erase_halos_3<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
-  assert(cudaDeviceSynchronize() == cudaSuccess);
 }
 
 /******************************************************************************/
@@ -350,7 +349,6 @@ __host__ void exchange_faces(float * lat) {
   exchange_faces_1<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
   exchange_faces_2<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
   exchange_faces_3<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
-  assert(cudaDeviceSynchronize() == cudaSuccess);
 }
 
 /******************************************************************************/
@@ -385,7 +383,6 @@ __host__ float* new_lattice() {
   fprintf(stderr, " done.\n");
   fprintf(stderr, "Memset'ting to 0...");
   assert(cudaMemset(lat, 0.0f, M_count) == cudaSuccess);
-  assert(cudaDeviceSynchronize() == cudaSuccess);
   fprintf(stderr, " done.\n");
 
   return lat;
@@ -408,7 +405,6 @@ __host__ curandState* new_rng() {
   fprintf(stderr, " done.\n");
   fprintf(stderr, "Initializing RNG...");
   rng_init<<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(clock(), states);
-  assert(cudaDeviceSynchronize() == cudaSuccess);
   fprintf(stderr, " done.\n");
 
   return states;
@@ -547,7 +543,6 @@ void mc_mean(const size_t N_cf, const size_t N_th, const bool verbose = false, c
     // Actually run the summation
     *sum_h = 0.0f;
     assert(cudaMemset(sum_d, 0.0f, 1) == cudaSuccess);
-    assert(cudaDeviceSynchronize() == cudaSuccess);
     CubDebugExit(cub::DeviceReduce::Sum(cub_tmp_storage, cub_tmp_bytes, lat, sum_d, M_count));
     // Retreive the result
     assert(cudaMemcpy(sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess);
