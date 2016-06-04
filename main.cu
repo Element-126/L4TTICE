@@ -42,17 +42,11 @@ constexpr size_t S1 = M0;
 constexpr size_t S2 = M0*Mi;
 constexpr size_t S3 = M0*Mi*Mi;
 
-// Lattice spacing
-constexpr float a = 1.0f;
-
 // Physical parameters
 constexpr float m2 = -1.0f;
 constexpr float lambda = 0.01f;
 
 // Monte-Carlo parameters
-constexpr unsigned int N_cor = 30;
-constexpr unsigned int N_cf  = 100;
-constexpr unsigned int N_th  = 10*N_cor;
 constexpr float epsilon = 1.0f;
 
 // Output
@@ -66,7 +60,7 @@ const H5std_string dataset_name("corr");
 
 // Change in the action when φ(i) → φ(i) + ζ
 // Idx: array index, including ghost cells
-__device__ float delta_S_kin(float * f, const size_t Idx, const float zeta) {
+__device__ float delta_S_kin(float * f, const size_t Idx, const float zeta, const float a) {
 
   return a*a*zeta*( 4.0f*zeta + 8.0f*f[Idx]
                     - f[Idx+1 ] - f[Idx-1 ] // ± (1,0,0,0)
@@ -77,20 +71,20 @@ __device__ float delta_S_kin(float * f, const size_t Idx, const float zeta) {
 }
 
 // Free field: V(φ) = ½m²φ²
-__device__ float delta_S_free(float * f, const size_t Idx, const float zeta) {
+__device__ float delta_S_free(float * f, const size_t Idx, const float zeta, const float a) {
 
   const float fi = f[Idx];
   const float delta_V = 0.5f*m2*zeta*(2.0f*fi+zeta);
-  return delta_S_kin(f, Idx, zeta) + a*a*a*a*delta_V;
+  return delta_S_kin(f, Idx, zeta, a) + a*a*a*a*delta_V;
 }
 
 // Interacting field: V(φ) = ½m²φ² + ¼λφ⁴
-__device__ float delta_S_phi4(float * f, const size_t Idx, const float zeta) {
+__device__ float delta_S_phi4(float * f, const size_t Idx, const float zeta, const float a) {
 
   const float fi = f[Idx];     // φi
   const float fiP = fi + zeta; // φi + ζ
   const float delta_V = 0.5f*m2*( fiP*fiP - fi*fi ) + 0.25f*lambda*( fiP*fiP*fiP*fiP - fi*fi*fi*fi );
-  return delta_S_kin(f, Idx, zeta) + a*a*a*a*delta_V;
+  return delta_S_kin(f, Idx, zeta, a) + a*a*a*a*delta_V;
 }
 
 // Choice of the action used in the simulation
@@ -108,8 +102,8 @@ constexpr auto dS = delta_S_phi4;
  *  Blocksize should be (B0/2,Bi,Bi) and stride Bi
  *  Gridsize should be (G0,Gi,Gi) and grid stride Gi
  */ 
-template<float (*delta_S)(float*, const size_t, const float)>
-__global__ void mc_update_black(float * lat, curandState * states) {
+template<float (*delta_S)(float*, const size_t, const float, const float)>
+__global__ void mc_update_black(float * lat, curandState * states, const float a) {
 
   // Global thread index
   const size_t t0 = blockIdx.x * blockDim.x + threadIdx.x;
@@ -161,11 +155,11 @@ __global__ void mc_update_black(float * lat, curandState * states) {
 
       const float zeta = (2.0f*curand_uniform(&state) - 1.0f) * epsilon; // ζ ∈ [-ε,+ε]
       // Compute change in the action due to variation ζ at site Idx
-      const float delta_S_i = delta_S(lat, Idx, zeta);
+      const float delta_S_i = delta_S(lat, Idx, zeta, a);
 
       // Update the lattice depending on the variation ΔSi
       const float update = (float) (delta_S_i < 0.0f || (exp(-delta_S_i) > curand_uniform(&state)));
-      // Is the above really branchless ?
+      // TODO - Is the above really branchless ?
       lat[Idx] += update * zeta;
     }
   }
@@ -178,8 +172,8 @@ __global__ void mc_update_black(float * lat, curandState * states) {
  *
  *  Same grid and block sizes as for black indices.
  */
-template<float (*delta_S)(float*, const size_t, const float)>
-__global__ void mc_update_white(float * lat, curandState * states) {
+template<float (*delta_S)(float*, const size_t, const float, const float)>
+__global__ void mc_update_white(float * lat, curandState * states, const float a) {
 
   // Global thread index
   const size_t t0 = blockIdx.x * blockDim.x + threadIdx.x;
@@ -204,7 +198,7 @@ __global__ void mc_update_white(float * lat, curandState * states) {
 
       const float zeta = (2.0f*curand_uniform(&state) - 1.0f) * epsilon; // ζ ∈ [-ε,+ε]
       // Compute change in the action due to variation ζ at site Idx
-      const float delta_S_i = delta_S(lat, Idx, zeta);
+      const float delta_S_i = delta_S(lat, Idx, zeta, a);
 
       // Update the lattice depending on the variation ΔSi
       const float update = (float) (delta_S_i < 0.0f || (exp(-delta_S_i) > curand_uniform(&state)));
@@ -295,7 +289,7 @@ __host__ void erase_halos(float * lat) {
 // ============================================
 
 // Face 0 (stride = 1)
-__global__ void exchange_faces_0(float * lat) {
+__global__ void update_halos_0(float * lat) {
 
   const size_t I1 = blockIdx.x * blockDim.x + threadIdx.x + 1;
   const size_t I2 = blockIdx.y * blockDim.y + threadIdx.y + 1;
@@ -307,7 +301,7 @@ __global__ void exchange_faces_0(float * lat) {
 }
 
 // Face 1 (stride S1 = M0)
-__global__ void exchange_faces_1(float * lat) {
+__global__ void update_halos_1(float * lat) {
 
   const size_t I0 = blockIdx.x * blockDim.x + threadIdx.x + 1;
   const size_t I2 = blockIdx.y * blockDim.y + threadIdx.y + 1;
@@ -319,7 +313,7 @@ __global__ void exchange_faces_1(float * lat) {
 }
 
 // Face 2 (stride S2 = M0·M1)
-__global__ void exchange_faces_2(float * lat) {
+__global__ void update_halos_2(float * lat) {
 
   const size_t I0 = blockIdx.x * blockDim.x + threadIdx.x + 1;
   const size_t I1 = blockIdx.y * blockDim.y + threadIdx.y + 1;
@@ -331,7 +325,7 @@ __global__ void exchange_faces_2(float * lat) {
 }
 
 // Face 3 (stride S3 = M0·M1·M2)
-__global__ void exchange_faces_3(float * lat) {
+__global__ void update_halos_3(float * lat) {
 
   const size_t I0 = blockIdx.x * blockDim.x + threadIdx.x + 1;
   const size_t I1 = blockIdx.y * blockDim.y + threadIdx.y + 1;
@@ -343,12 +337,12 @@ __global__ void exchange_faces_3(float * lat) {
 }
 
 // Exchange all faces
-__host__ void exchange_faces(float * lat) {
+__host__ void update_halos(float * lat) {
 
-  exchange_faces_0<<<dim3(Gi,Gi,Gi),dim3(Bi,Bi,Bi)>>>(lat);
-  exchange_faces_1<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
-  exchange_faces_2<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
-  exchange_faces_3<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
+  update_halos_0<<<dim3(Gi,Gi,Gi),dim3(Bi,Bi,Bi)>>>(lat);
+  update_halos_1<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
+  update_halos_2<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
+  update_halos_3<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
 }
 
 /******************************************************************************/
@@ -357,12 +351,12 @@ __host__ void exchange_faces(float * lat) {
 // ===============
 
 // Perform one Monte-Carlo iteration
-template <float (*delta_S)(float*, const size_t, const float)>
-void mc_update(float* lat, curandState * states) {
+template <float (*delta_S)(float*, const size_t, const float, const float a)>
+void mc_update(float* lat, curandState * states, const float a) {
 
-  mc_update_black<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states);
-  mc_update_white<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states);
-  exchange_faces(lat);
+  mc_update_black<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states, a);
+  mc_update_white<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states, a);
+  update_halos(lat);
 }
 
 // Resource management
@@ -420,7 +414,7 @@ __host__ void delete_rng(curandState ** states) {
 // --------------
 
 // Compute the space-average of the time-slice correlator value over many configurations.
-__host__ void mc_average(const size_t N_cf = N_cf, const size_t N_cor = N_cor, const size_t N_th = N_th) {
+__host__ void mc_average(const size_t N_cf, const size_t N_cor, const size_t N_th, const float a) {
 
   auto lat = new_lattice();
   auto states = new_rng();
@@ -443,7 +437,7 @@ __host__ void mc_average(const size_t N_cf = N_cf, const size_t N_cor = N_cor, c
   fprintf(stderr, "Thermalizing lattice...");
   cudaEventRecord(start);
   for (size_t i = 0 ; i < N_th ; ++i) {
-    mc_update<dS>(lat, states);
+    mc_update<dS>(lat, states, a);
   }
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
@@ -457,7 +451,7 @@ __host__ void mc_average(const size_t N_cf = N_cf, const size_t N_cor = N_cor, c
   for (size_t i = 0 ; i < N_cf ; ++i) {
     // Drop N_cor iterations to damp correlations between successive configurations.
     for (size_t j = 0 ; j < N_cor ; ++j) {
-      mc_update<dS>(lat, states);
+      mc_update<dS>(lat, states, a);
     }
     fprintf(stderr, " %d", i);
     // Compute the euclidean time correlations within one configuration.
@@ -491,7 +485,7 @@ __host__ void mc_average(const size_t N_cf = N_cf, const size_t N_cor = N_cor, c
   fprintf(stderr, " done.\n");
 }
 
-void thermalize_conf(float * lat, curandState * states, const size_t N_th = N_th,
+void thermalize_conf(float * lat, curandState * states, const float a, const size_t N_th,
                      const bool verbose = false, const size_t poll = 1) {
 
   // Thermalize lattice
@@ -501,7 +495,7 @@ void thermalize_conf(float * lat, curandState * states, const size_t N_th = N_th
   fprintf(stderr, "Thermalizing lattice...");
   cudaEventRecord(start);
   for (size_t i = 1 ; i <= N_th ; ++i) {
-    mc_update<dS>(lat, states);
+    mc_update<dS>(lat, states, a);
     if (verbose && i % poll == 0) {
       fprintf(stderr, " %llu", i);
     }
@@ -515,8 +509,18 @@ void thermalize_conf(float * lat, curandState * states, const size_t N_th = N_th
 
 /*
  * Generate N_cf configurations, thermalize them and compute their means.
+ *
+ * Mandatory parameters:
+ *   N_cf = number of configurations to generate
+ *   N_th = number of MC iterations to thermalize the lattice
+ *   a    = lattice spacing
+ *
+ * Optional parameters:
+ *   verbose = whether to print the current status to stderr
+ *   poll_th = number of MC updates between status updates
  */
-void mc_mean(const size_t N_cf, const size_t N_th, const bool verbose = false, const size_t poll_cf = 1, const size_t poll_th = 500) {
+void mc_mean(const size_t N_cf, const size_t N_th, const float a,
+             const bool verbose = false, const size_t poll_th = 500) {
 
   // Allocate resources for the simulation
   auto lat = new_lattice();
@@ -537,7 +541,7 @@ void mc_mean(const size_t N_cf, const size_t N_th, const bool verbose = false, c
   for (size_t k = 1 ; k <= N_cf ; ++k) {
 
     // Thermalize the configuration
-    thermalize_conf(lat, states, N_th, verbose, poll_th);
+    thermalize_conf(lat, states, a, N_th, verbose, poll_th);
     // Erase the halos in order not to interfere with the summation
     erase_halos(lat);
     // Actually run the summation
@@ -562,7 +566,7 @@ void mc_mean(const size_t N_cf, const size_t N_th, const bool verbose = false, c
 
 __host__ int main() {
 
-  mc_mean(8, 5000, true, 1, 1000);
+  mc_mean(8, 5000, 1.0f, true, 1000);
 
   return 0;
 }
