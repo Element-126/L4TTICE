@@ -2,3 +2,6 @@ lattice
 *.o
 *.h5
 usr/*
+.RData
+.Rhistory
+*#*
