@@ -613,6 +613,17 @@ __host__ void test(const unsigned long long seed) {
                seed);
 }
 
+__host__ void debug(const unsigned long long seed) {
+
+  mc_mean_temp(std::vector<float>({8.}),
+               std::vector<size_t>({1}),
+               std::vector<size_t>({1}),
+               std::vector<float>({1.}),
+               3, 1,
+               "",
+               seed);
+}
+
 __host__ int main() {
 
   // full_run();
