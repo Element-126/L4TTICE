@@ -5,3 +5,4 @@ usr/*
 .RData
 .Rhistory
 *#*
+data/*
