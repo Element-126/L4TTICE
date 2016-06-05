@@ -48,6 +48,10 @@ constexpr size_t S3 = M0*Mi*Mi;
 constexpr float m2 = -1./8.;
 constexpr float lambda = 1./32.;
 
+// Assumptions which must be satisfied for the simulation to work as expected
+static_assert(B0 % 2 == 0, "B0 must be even");
+static_assert(Bi % 2 == 0, "Bi must be even");
+
 /******************************************************************************/
 
 // Variation of the action
