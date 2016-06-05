@@ -155,7 +155,7 @@ __global__ void mc_update_black(float * lat, curandState * states,
 
       // Update the lattice depending on the variation ΔSi
       const float update = (float) (delta_S_i < 0.0f || (exp(-delta_S_i) > curand_uniform(&state)));
-      // TODO - Is the above really branchless ?
+      // Slightly faster than the divergent version
       lat[Idx] += update * zeta;
     }
   }
@@ -584,11 +584,11 @@ void mc_mean_temp(const std::vector<float> beta, const std::vector<size_t> N_cf,
 
 __host__ void full_run() {
 
-  mc_mean_temp(std::vector<float>({8., 6., 5., 4., 3., 2.5, 2./*, 1.5, 1.25, 1.*/}),
-               std::vector<size_t>({128, 72, 48, 32, 16, 12, 8/*, 6, 4, 4*/}),
-               std::vector<size_t>({2000, 3500, 5000, 8000, 14000, 20000, 32000/*, 57000, 82000, 128000*/}),
-               std::vector<float>({1.0, 1.33, 1.6, 2.0, 2.67, 3.2, 4.0/*, 5.33, 6.4, 8.0*/}),
-               2, 2000,
+  mc_mean_temp(std::vector<float>({8., 6., 5., 4., 3., 2.5, 2., 1.5, 1.25, 1.}),
+               std::vector<size_t>({80, 80, 80, 80, 80, 80, 48, 28, 22, 16}),
+               std::vector<size_t>({2000, 6000, 10000, 17000, 30000, 38000, 50000, 85000, 110000, 150000}),
+               std::vector<float>({1., 3., 6., 10., 18., 24., 32., 80., 125., 200.}),
+               2, 10000,
                "means.h5");
 }
 
@@ -604,11 +604,11 @@ __host__ void benchmark() {
 
 __host__ void test(const unsigned long long seed) {
 
-  mc_mean_temp(std::vector<float>({8., 4.}),
-               std::vector<size_t>({16, 4}),
-               std::vector<size_t>({2000, 10000}),
-               std::vector<float>({1., 2.}),
-               2, 1000,
+  mc_mean_temp(std::vector<float>({8., 4., 2., 1.}),
+               std::vector<size_t>({32, 16, 8, 4}),
+               std::vector<size_t>({2000, 10000, 50000, 250000}),
+               std::vector<float>({1., 4., 16., 64.}),
+               2, 10000,
                "test.h5",
                seed);
 }
@@ -626,9 +626,9 @@ __host__ void debug(const unsigned long long seed) {
 
 __host__ int main() {
 
-  // full_run();
+  full_run();
   // benchmark();
-  test(42);
+  // test(42);
 
   return 0;
 }
