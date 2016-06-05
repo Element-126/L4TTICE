@@ -149,7 +149,7 @@ __global__ void mc_update_black(float * lat, curandState * states,
 
       const size_t t3 = g3*Bi+b3;
       
-      // Array index (TODO: move this outside of the loop)
+      // Array index
       const size_t parity = (t1 + t2 + t3) & 1; // 0 if t1+t2+t3 even, 1 otherwise
       const size_t Idx = 2*t0+1 + S1*(t1+1) + S2*(t2+1) + S3*(t3+1) + parity;
 
