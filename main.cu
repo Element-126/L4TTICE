@@ -377,7 +377,7 @@ __host__ float* new_lattice(const bool verbose = false) {
     fprintf(stderr, " done.\n");
     fprintf(stderr, "Memset'ting to 0...");
   }
-  assert(cudaMemset(lat, 0.0f, M_count) == cudaSuccess);
+  assert(cudaMemset(lat, 0.0f, M_bytes) == cudaSuccess);
   if (verbose) {
     fprintf(stderr, " done.\n");
   }
