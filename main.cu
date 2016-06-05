@@ -585,7 +585,7 @@ void mc_mean_temp(const std::vector<float> beta, const std::vector<size_t> N_cf,
 __host__ void full_run() {
 
   mc_mean_temp(std::vector<float>({8., 6., 5., 4., 3., 2.5, 2., 1.5, 1.25, 1.}),
-               std::vector<size_t>({80, 80, 80, 80, 80, 80, 48, 28, 22, 16}),
+               std::vector<size_t>({50, 50, 50, 50, 50, 50, 36, 20, 16, 12}),
                std::vector<size_t>({2000, 6000, 10000, 17000, 30000, 38000, 50000, 85000, 110000, 150000}),
                std::vector<float>({1., 3., 6., 10., 18., 24., 32., 80., 125., 200.}),
                2, 10000,
@@ -594,10 +594,10 @@ __host__ void full_run() {
 
 __host__ void benchmark() {
 
-  mc_mean_temp(std::vector<float>({8., 6., 4., 3.}),
-               std::vector<size_t>({24, 12, 8, 4}),
-               std::vector<size_t>({2000, 4000, 10000, 20000}),
-               std::vector<float>({1., 1.33, 2., 2.67}),
+  mc_mean_temp(std::vector<float>({8.}),
+               std::vector<size_t>({12}),
+               std::vector<size_t>({2000}),
+               std::vector<float>({1.}),
                0, 0,
                "out.h5");
 }
@@ -626,8 +626,8 @@ __host__ void debug(const unsigned long long seed) {
 
 __host__ int main() {
 
-  full_run();
-  // benchmark();
+  // full_run();
+  benchmark();
   // test(42);
 
   return 0;
