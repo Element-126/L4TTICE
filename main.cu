@@ -391,7 +391,7 @@ __host__ void delete_lattice(float ** lat) {
   *lat = nullptr;
 }
 
-__host__ curandState* new_rng(const bool verbose = false) {
+__host__ curandState* new_rng(const bool verbose = false, unsigned long long seed = 0) {
 
   curandState * states;
 
@@ -405,7 +405,10 @@ __host__ curandState* new_rng(const bool verbose = false) {
     fprintf(stderr, " done.\n");
     fprintf(stderr, "Initializing RNG...");
   }
-  rng_init<<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(clock(), states);
+  if (seed == 0) {
+    seed = clock();
+  }
+  rng_init<<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(seed, states);
   if (verbose) {
     fprintf(stderr, " done.\n");
   }
@@ -511,7 +514,8 @@ void mc_mean(const size_t N_cf, const size_t N_th, const float a, const float ep
 void mc_mean_temp(const std::vector<float> beta, const std::vector<size_t> N_cf,
                   const std::vector<size_t> N_th, const std::vector<float> epsilon,
                   const int verbose = 0, const size_t poll_th = 1000,
-                  const std::string filename = "") {
+                  const std::string filename = "",
+                  const unsigned long long seed = 0) {
 
   assert(beta.size() == N_cf.size());
   assert(beta.size() == N_th.size());
@@ -521,7 +525,7 @@ void mc_mean_temp(const std::vector<float> beta, const std::vector<size_t> N_cf,
    * Allocate resources for the simulation
    */
   auto lat = new_lattice(verbose > 0);
-  auto states = new_rng(verbose > 0);
+  auto states = new_rng(verbose > 0, seed);
 
   //Prepare resources for CUB
   float * sum_d = nullptr;
@@ -598,10 +602,22 @@ __host__ void benchmark() {
                "out.h5");
 }
 
+__host__ void test(const unsigned long long seed) {
+
+  mc_mean_temp(std::vector<float>({8., 4.}),
+               std::vector<size_t>({16, 4}),
+               std::vector<size_t>({2000, 10000}),
+               std::vector<float>({1., 2.}),
+               2, 1000,
+               "test.h5",
+               seed);
+}
+
 __host__ int main() {
 
   // full_run();
-  benchmark();
+  // benchmark();
+  test(42);
 
   return 0;
 }
