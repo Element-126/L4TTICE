@@ -212,6 +212,9 @@ __global__ void mc_update_white(float * lat, curandState * states,
   states[tid] = state;
 }
 
+// Initialization of device side resources
+// =======================================
+
 /*
  * Initialize RNG state
  *
@@ -226,6 +229,11 @@ __global__ void rng_init(unsigned long long seed, curandState * states) {
   const size_t Idx = I0 + (N0>>1)*I1 + (N0*Ni>>1)*I2;
   curand_init(seed, Idx, 0, &states[Idx]);
 }
+
+/******************************************************************************/
+
+// Halo related kernels
+// ====================
 
 /*
  * Set the 3d halos to zero so they do not affect the reduction
@@ -283,8 +291,6 @@ __host__ void erase_halos(float * lat) {
   erase_halos_2<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
   erase_halos_3<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
 }
-
-/******************************************************************************/
 
 // Exchange of the 3d "faces" of the 4d lattice
 // ============================================
@@ -586,6 +592,10 @@ void mc_mean_temp(const std::vector<float> beta, const std::vector<size_t> N_cf,
   (verbose > 0) && fprintf(stderr, " done\n");
 }
 
+// Presets
+// =======
+
+// Values used to obtain figure 2
 __host__ void full_run() {
 
   mc_mean_temp(std::vector<float>({8., 6., 5., 4., 3., 2.5, 2., 1.5, 1.25, 1.}),
@@ -596,6 +606,7 @@ __host__ void full_run() {
                "means.h5");
 }
 
+// The benchmark used to study scaling (where Bi = 2 B0 is varied)
 __host__ void benchmark() {
 
   mc_mean_temp(std::vector<float>({8.}),
@@ -606,6 +617,8 @@ __host__ void benchmark() {
                "out.h5");
 }
 
+// Test the overall behaviour at high temperature to fine-tune the parameters
+// Can also be used as a reproducible test case to compare with the shared memory implementation
 __host__ void test(const unsigned long long seed) {
 
   mc_mean_temp(std::vector<float>({8., 4., 2., 1.}),
@@ -617,6 +630,7 @@ __host__ void test(const unsigned long long seed) {
                seed);
 }
 
+// Exactly one iteration
 __host__ void debug(const unsigned long long seed) {
 
   mc_mean_temp(std::vector<float>({8.}),
@@ -628,6 +642,11 @@ __host__ void debug(const unsigned long long seed) {
                seed);
 }
 
+/*
+ * Entry point of the program
+ *
+ * Call the desired function from here
+ */
 __host__ int main() {
 
   // full_run();
