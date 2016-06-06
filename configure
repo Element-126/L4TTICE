@@ -1,4 +1,4 @@
 # Source this file to configure the environment
 
 module load cuda/7.0 gcc/4.8.3
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/home/jltastet/phpc-lattice/usr/lib"
+export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:./usr/lib"
