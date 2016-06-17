@@ -362,6 +362,7 @@ template <float (*delta_S)(float*, const size_t, const float, const float a)>
 void mc_update(float* lat, curandState * states, const float a, const float epsilon) {
 
   mc_update_black<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states, a, epsilon);
+  update_halos(lat);
   mc_update_white<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states, a, epsilon);
   update_halos(lat);
 }
