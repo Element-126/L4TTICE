@@ -230,6 +230,22 @@ __global__ void rng_init(unsigned long long seed, curandState * states) {
   curand_init(seed, Idx, 0, &states[Idx]);
 }
 
+/*
+ * Sets the whole lattice (except halos) to a constant value
+ *
+ * Must be called with grid size (G0,Gi,Gi) and block size (B0,Bi,Bi)
+ */
+__global__ void fill(float * lat, const float val) {
+
+  const size_t I0 = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  const size_t I1 = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  const size_t I2 = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  for (size_t I3 = 1 ; I3 <= Ni ; ++I3) {
+    const size_t Idx = I0 + I1*S1 + I2*S2 + I3*S3;
+    lat[Idx] = val;
+  }
+}
+
 /******************************************************************************/
 
 // Halo related kernels
@@ -388,7 +404,7 @@ __host__ float* new_lattice(const bool verbose = false) {
     fprintf(stderr, " done.\n");
     fprintf(stderr, "Memset'ting to 0...");
   }
-  assert(cudaMemset(lat, 0.0f, M_bytes) == cudaSuccess);
+  fill<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat, 0.0f);
   if (verbose) {
     fprintf(stderr, " done.\n");
   }
@@ -504,7 +520,7 @@ void mc_mean(const size_t N_cf, const size_t N_th, const float a, const float ep
     assert(cudaMemcpy(sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess);
     float mean = *sum_h / (N0*Ni*Ni*Ni);
     // Reset the lattice to zero for the next run
-    assert(cudaMemset(lat, 0.0f, M_bytes) == cudaSuccess);
+    fill<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat, 0.0f);
     if (verbose >= 3) {
       // Print the result
       fprintf(stderr, "Mean = %f\n", mean);
