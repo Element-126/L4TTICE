@@ -163,6 +163,10 @@ __global__ void mc_update(float * lat, curandState * states, const int parity,
       const size_t idx = idx0 + s3*t3;
       
       sub[idx] = lat[Idx];
+
+      // printf("%lu@(%u,%u,%u,%lu)[%.3f] <- %lu@(%lu,%lu,%lu,%lu)[%.3f]\n",
+      //        idx, threadIdx.x, threadIdx.y, threadIdx.z, t3, sub[idx],
+      //        Idx, I0, I1, I2, I3, lat[Idx]);
     }
 
     __syncthreads();
@@ -206,6 +210,10 @@ __global__ void mc_update(float * lat, curandState * states, const int parity,
         const size_t idx = idx0 + s3*t3;
       
         lat[Idx] = sub[idx];
+
+        // printf("%lu@(%u,%u,%u,%lu)[%.3f] -> %lu@(%lu,%lu,%lu,%lu)[%.3f]\n",
+        //        idx, threadIdx.x, threadIdx.y, threadIdx.z, t3, sub[idx],
+        //        Idx, I0, I1, I2, I3, lat[Idx]);
       }
     }
   }
@@ -401,6 +409,7 @@ __host__ float* new_lattice(const bool verbose = false) {
     fprintf(stderr, "Lattice: (%d,%d,%d,%d)\n", N0, Ni, Ni, Ni);
     fprintf(stderr, "Array:   (%d,%d,%d,%d)\n", M0, Mi, Mi, Mi);
     fprintf(stderr, "M_count = %d\n", M_count);
+    fprintf(stderr, "Shared memory per block: %d\n", m0*mi*mi*mi * sizeof(float));
   
     fprintf(stderr, "Allocating lattice array...\n");
     fprintf(stderr, "Requesting %d bytes...", M_bytes);
@@ -410,8 +419,11 @@ __host__ float* new_lattice(const bool verbose = false) {
     fprintf(stderr, " done.\n");
     fprintf(stderr, "Memset'ting to 0...");
   }
-  fill<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat, INIT_VAL);
-  update_halos(lat);
+  assert(cudaMemset(lat, 0, M_bytes) == cudaSuccess);
+  if (INIT_VAL != 0.0f) {
+    fill<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat, INIT_VAL);
+    update_halos(lat);
+  }
   if (verbose) {
     fprintf(stderr, " done.\n");
   }
@@ -689,6 +701,7 @@ __host__ int main() {
   // full_run();
   // benchmark();
   short_test(42, "test_shared_mem.h5");
+  // debug(1);
 
   return 0;
 }
