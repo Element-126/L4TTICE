@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <vector>
 #include <numeric>
+#include <string>
 // HDF5
 #include "H5Cpp.h"
 // CUB
@@ -636,14 +637,25 @@ __host__ void benchmark() {
 
 // Test the overall behaviour at high temperature to fine-tune the parameters
 // Can also be used as a reproducible test case to compare with the shared memory implementation
-__host__ void test(const unsigned long long seed) {
+__host__ void test(const unsigned long long seed, const std::string name = "test.h5") {
 
   mc_mean_temp(std::vector<float>({8., 4., 2., 1.}),
                std::vector<size_t>({32, 16, 8, 4}),
                std::vector<size_t>({2000, 10000, 50000, 250000}),
                std::vector<float>({1., 4., 16., 64.}),
                2, 10000,
-               "test.h5",
+               name,
+               seed);
+}
+
+__host__ void short_test(const unsigned long long seed, const std::string name = "test.h5") {
+
+  mc_mean_temp(std::vector<float>({8., 4., 2., 1.}),
+               std::vector<size_t>({12, 8, 4, 2}),
+               std::vector<size_t>({2000, 17000, 50000, 150000}),
+               std::vector<float>({1., 4., 16., 64.}),
+               2, 10000,
+               name,
                seed);
 }
 
@@ -667,8 +679,8 @@ __host__ void debug(const unsigned long long seed) {
 __host__ int main() {
 
   // full_run();
-  benchmark();
-  // test(42);
+  // benchmark();
+  short_test(42);
 
   return 0;
 }
