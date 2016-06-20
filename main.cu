@@ -19,12 +19,16 @@
 // Geometry & parameters
 // =====================
 
-// Block size
-constexpr size_t B0 = 8;
-constexpr size_t Bi = 8;
-// Number of threads 8³ = 512
+// Sub-lattice size (without halos)
+constexpr size_t n0 = 8;
+constexpr size_t ni = 8;
+
+// Block size (with halos)
+constexpr size_t m0 = n0+2;
+constexpr size_t mi = ni+2;
+// Number of threads per block: 10³ = 1000
 // Loop over the last dimension
-// Shared memory usage: 44000o including halos.
+// Shared memory usage for the sub-lattice: 40000o including halos.
 // Then grid-stride loop to reuse the RNG state
 
 // Grid size
@@ -32,8 +36,8 @@ constexpr size_t G0 = 1;
 constexpr size_t Gi = 2;
   
 // Lattice size
-constexpr size_t N0 = B0*G0;
-constexpr size_t Ni = Bi*Gi;
+constexpr size_t N0 = G0*n0;
+constexpr size_t Ni = Gi*ni;
 
 // Data array size (including ghost cells)
 constexpr size_t M0 = N0+2;
@@ -44,14 +48,20 @@ constexpr size_t M_bytes = M_count*sizeof(float);
 constexpr size_t S1 = M0;
 constexpr size_t S2 = M0*Mi;
 constexpr size_t S3 = M0*Mi*Mi;
+constexpr size_t s1 = m0;
+constexpr size_t s2 = m0*mi;
+constexpr size_t s3 = m0*mi*mi;
 
 // Physical parameters
 constexpr float m2 = -1./8.;
 constexpr float lambda = 1./32.;
 
 // Assumptions which must be satisfied for the simulation to work as expected
-static_assert(B0 % 2 == 0, "B0 must be even");
-static_assert(Bi % 2 == 0, "Bi must be even");
+static_assert(n0 % 2 == 0, "n0 must be even");
+static_assert(ni % 2 == 0, "ni must be even");
+
+// Initial lattice value (to debug convergence issues)
+constexpr float INIT_VAL = 0.0f;
 
 /******************************************************************************/
 
@@ -64,9 +74,9 @@ __device__ float delta_S_kin(float * f, const size_t Idx, const float zeta, cons
 
   return a*a*zeta*( 4.0f*zeta + 8.0f*f[Idx]
                     - f[Idx+1 ] - f[Idx-1 ] // ± (1,0,0,0)
-                    - f[Idx+S1] - f[Idx-S1] // ± (0,1,0,0)
-                    - f[Idx+S2] - f[Idx-S2] // ± (0,0,1,0)
-                    - f[Idx+S3] - f[Idx-S3] // ± (0,0,0,1)
+                    - f[Idx+s1] - f[Idx-s1] // ± (0,1,0,0)
+                    - f[Idx+s2] - f[Idx-s2] // ± (0,0,1,0)
+                    - f[Idx+s3] - f[Idx-s3] // ± (0,0,0,1)
                     );
 }
 
@@ -99,69 +109,104 @@ constexpr auto dS = delta_S_phi4;
 
 /*  MC iteration over "black" indices
  *
- *  Blocksize should be (B0/2,Bi,Bi) and stride Bi
+ *  Blocksize should be (m0,mi,mi) and stride mi
  *  Gridsize should be (G0,Gi,Gi) and grid stride Gi
+ *
+ *  parity_offset: 0 for black sites, 1 for white ones
  */ 
 template<float (*delta_S)(float*, const size_t, const float, const float)>
-__global__ void mc_update_black(float * lat, curandState * states,
-                                const float a, const float epsilon) {
+__global__ void mc_update(float * lat, curandState * states, const int parity,
+                          const float a, const float epsilon) {
+
+  // 4D sub-lattice
+  __shared__ float sub[m0*mi*mi*mi];
 
   // Global thread index
-  const size_t t0 = blockIdx.x * blockDim.x + threadIdx.x;
-  const size_t t1 = blockIdx.y * blockDim.y + threadIdx.y;
-  const size_t t2 = blockIdx.z * blockDim.z + threadIdx.z;
+  const size_t T0 = blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t T1 = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t T2 = blockIdx.z * blockDim.z + threadIdx.z;
 
   // Linear thread index
-  const size_t tid = t0 + (N0>>1)*t1 + (N0*Ni>>1)*t2;
-  
-  auto state = states[tid];
+  const size_t tid = T0 + S1*T1 + S2*T2;
 
-  /*  Indices, assuming dimension 0 is even
-   *
-   *  Physical index: 2·t0 + N0·t1 + N0·N1·t2 + N0·N1·N2·t3 + parity of (t1+t2+t3)
-   *  Ex: 4×4 lattice
-   *      +–––––––––+
-   *      | 0 · 4 · |
-   *      | · 2 · 6 |
-   *      | 1 · 5 · |
-   *      | · 3 · 7 |
-   *      +–––––––––+
-   *
-   *  Array index:    2·t0+1 + M0*(t1+1) + M0·M1·(t2+1) + M0·M1·M2·(t3+1) + parity of (t1+t2+t3)
-   *  Ex: 4×4 lattice
-   *
-   *      |  halos  |
-   *      v         v 
-   *    +–––––––––––––+
-   *    | × · × · × · | <– halo
-   *    | · 0 · 4 · × |
-   *    | × · 2 · 6 · |
-   *    | · 1 · 5 · × |
-   *    | × · 3 · 7 · |
-   *    | · × · × · × | <– halo
-   *    +–––––––––––––+
-   */
+  // Whether the thread corresponds to a halo or not.
+  const bool halo = (threadIdx.x == 0 || threadIdx.x == m0-1 ||
+                     threadIdx.y == 0 || threadIdx.y == mi-1 ||
+                     threadIdx.z == 0 || threadIdx.z == mi-1);
+
+  // Load RNG state
+  curandState state;
+  if (!halo) {
+    state = states[tid];
+  }
+
+  // First 3 indices of the global multidimensional array
+  const size_t I0 = blockIdx.x * n0 + threadIdx.x;
+  const size_t I1 = blockIdx.y * ni + threadIdx.y;
+  const size_t I2 = blockIdx.z * ni + threadIdx.z;
+
+  // Global array index (starting value)
+  const size_t Idx0 = I0 + S1*I1 + S2*I2;
+  // Local array index (starting value)
+  const size_t idx0 = threadIdx.x + s1*threadIdx.y + s2*threadIdx.z;
 
   // Grid stride loop in direction 3
-  for (size_t g3 = 0 ; g3 < Gi ; ++g3) {
+  for (size_t b3 = 0 ; b3 < Gi ; ++b3) {
 
-    // Small loop in direction 3
-    for (size_t b3 = 0 ; b3 < Bi ; ++b3) {
+    // Load values (including halos) in shared array
+    for (size_t t3 = 0 ; t3 < mi ; ++t3) {
 
-      const size_t t3 = g3*Bi+b3;
+      const size_t I3 = b3 * ni + t3;
+      // Global array index
+      const size_t Idx = Idx0 + S3*I3;
+      // Local array index
+      const size_t idx = idx0 + s3*t3;
       
-      // Array index
-      const size_t parity = (t1 + t2 + t3) & 1; // 0 if t1+t2+t3 even, 1 otherwise
-      const size_t Idx = 2*t0+1 + S1*(t1+1) + S2*(t2+1) + S3*(t3+1) + parity;
+      sub[idx] = lat[Idx];
+    }
 
-      const float zeta = (2.0f*curand_uniform(&state) - 1.0f) * epsilon; // ζ ∈ [-ε,+ε]
-      // Compute change in the action due to variation ζ at site Idx
-      const float delta_S_i = delta_S(lat, Idx, zeta, a);
+    __syncthreads();
 
-      // Update the lattice depending on the variation ΔSi
-      const float update = (float) (delta_S_i < 0.0f || (exp(-delta_S_i) > curand_uniform(&state)));
-      // Slightly faster than the divergent version
-      lat[Idx] += update * zeta;
+    // Small loop in direction 3 (ignoring all halos)
+    if (!halo) {
+      for (size_t t3 = 1 ; t3 < mi-1 ; ++t3) {
+
+        // Parity of t0+t1+t2+t3 (4D parity = color on the checkerboard)
+        const size_t par = (threadIdx.x + threadIdx.y + threadIdx.z + t3) & 1; 
+
+        // Update only sites matching the parity passed to the kernel
+        if (par == parity) {
+
+          // Local array index
+          const size_t idx = idx0 + s3*t3;
+      
+          const float zeta = (2.0f*curand_uniform(&state) - 1.0f) * epsilon; // ζ ∈ [-ε,+ε]
+          // Compute change in the action due to variation ζ at site Idx
+          const float delta_S_i = delta_S(sub, idx, zeta, a);
+        
+          // Update the lattice depending on the variation ΔSi
+          const float update = (float) (delta_S_i < 0.0f || (exp(-delta_S_i) > curand_uniform(&state)));
+
+          sub[idx] += update * zeta;
+        }
+      }
+    }
+
+    // End divergence before writing back to global memory
+    __syncthreads();
+    
+    // Store values (except halos) in global array
+    if (!halo) {
+      for (size_t t3 = 1 ; t3 < mi-1 ; ++t3) {
+
+        const size_t I3 = b3 * ni + t3;
+        // Global array index
+        const size_t Idx = Idx0 + S3*I3;
+        // Local array index
+        const size_t idx = idx0 + s3*t3;
+      
+        lat[Idx] = sub[idx];
+      }
     }
   }
 
@@ -169,49 +214,7 @@ __global__ void mc_update_black(float * lat, curandState * states,
   states[tid] = state;
 }
 
-/*  MC iteration over "white" indices
- *
- *  Same grid and block sizes as for black indices.
- */
-template<float (*delta_S)(float*, const size_t, const float, const float)>
-__global__ void mc_update_white(float * lat, curandState * states,
-                                const float a, const float epsilon) {
-
-  // Global thread index
-  const size_t t0 = blockIdx.x * blockDim.x + threadIdx.x;
-  const size_t t1 = blockIdx.y * blockDim.y + threadIdx.y;
-  const size_t t2 = blockIdx.z * blockDim.z + threadIdx.z;
-
-  // Linear thread index
-  const size_t tid = t0 + (N0>>1)*t1 + (N0*Ni>>1)*t2;
-  
-  auto state = states[tid];
-
-  // Grid stride loop in direction 3
-  for (size_t g3 = 0 ; g3 < Gi ; ++g3) {
-
-    // Small loop in direction 3
-    for (size_t b3 = 0 ; b3 < Bi ; ++b3) {
-
-      const size_t t3 = g3*Bi+b3;
-      const size_t parity = (t1 + t2 + t3) & 1; // 0 if t1+t2+t3 even, 1 otherwise
-      // Main difference with "black" indices: opposite parity
-      const size_t Idx = 2*t0+1 + S1*(t1+1) + S2*(t2+1) + S3*(t3+1) + !parity;
-
-      const float zeta = (2.0f*curand_uniform(&state) - 1.0f) * epsilon; // ζ ∈ [-ε,+ε]
-      // Compute change in the action due to variation ζ at site Idx
-      const float delta_S_i = delta_S(lat, Idx, zeta, a);
-
-      // Update the lattice depending on the variation ΔSi
-      const float update = (float) (delta_S_i < 0.0f || (exp(-delta_S_i) > curand_uniform(&state)));
-      // Is the above really branchless ?
-      lat[Idx] += update * zeta;
-    }
-  }
-
-  // Write RNG state back to global memory
-  states[tid] = state;
-}
+/******************************************************************************/
 
 // Initialization of device side resources
 // =======================================
@@ -220,14 +223,14 @@ __global__ void mc_update_white(float * lat, curandState * states,
  * Initialize RNG state
  *
  * Grid size: (G0,Gi,Gi)
- * Block size: (N0/2,Ni,Ni)
+ * Block size: (m0,mi,mi)
  */
 __global__ void rng_init(unsigned long long seed, curandState * states) {
 
   const size_t I0 = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t I1 = blockIdx.y * blockDim.y + threadIdx.y;
   const size_t I2 = blockIdx.z * blockDim.z + threadIdx.z;
-  const size_t Idx = I0 + (N0>>1)*I1 + (N0*Ni>>1)*I2;
+  const size_t Idx = I0 + S1*I1 + S2*I2;
   curand_init(seed, Idx, 0, &states[Idx]);
 }
 
@@ -253,8 +256,8 @@ __global__ void fill(float * lat, const float val) {
 // ====================
 
 /*
- * Set the 3d halos to zero so they do not affect the reduction
- *
+ * Set the 3D halos to zero so they do not affect the reduction
+ * The lower-dimensional halos are assumed to be zero at all times
  * Can be undone by calling exchange_faces
  */
 __global__ void erase_halos_0(float * lat) {
@@ -303,14 +306,17 @@ __global__ void erase_halos_3(float * lat) {
 
 __host__ void erase_halos(float * lat) {
 
-  erase_halos_0<<<dim3(Gi,Gi,Gi),dim3(Bi,Bi,Bi)>>>(lat);
-  erase_halos_1<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
-  erase_halos_2<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
-  erase_halos_3<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
+  erase_halos_0<<<dim3(Gi,Gi,Gi),dim3(ni,ni,ni)>>>(lat);
+  erase_halos_1<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat);
+  erase_halos_2<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat);
+  erase_halos_3<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat);
 }
 
-// Exchange of the 3d "faces" of the 4d lattice
-// ============================================
+/*
+ * Update the 3D "faces" of the 4d lattice
+ *
+ * Lower dimensional halos are unused and don't need updating
+ */
 
 // Face 0 (stride = 1)
 __global__ void update_halos_0(float * lat) {
@@ -363,10 +369,10 @@ __global__ void update_halos_3(float * lat) {
 // Exchange all faces
 __host__ void update_halos(float * lat) {
 
-  update_halos_0<<<dim3(Gi,Gi,Gi),dim3(Bi,Bi,Bi)>>>(lat);
-  update_halos_1<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
-  update_halos_2<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
-  update_halos_3<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat);
+  update_halos_0<<<dim3(Gi,Gi,Gi),dim3(ni,ni,ni)>>>(lat);
+  update_halos_1<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat);
+  update_halos_2<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat);
+  update_halos_3<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat);
 }
 
 /******************************************************************************/
@@ -378,9 +384,9 @@ __host__ void update_halos(float * lat) {
 template <float (*delta_S)(float*, const size_t, const float, const float a)>
 void mc_update(float* lat, curandState * states, const float a, const float epsilon) {
 
-  mc_update_black<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states, a, epsilon);
+  mc_update<delta_S><<<dim3(G0,Gi,Gi),dim3(m0,mi,mi)>>>(lat, states, 0, a, epsilon);
   update_halos(lat);
-  mc_update_white<delta_S><<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(lat, states, a, epsilon);
+  mc_update<delta_S><<<dim3(G0,Gi,Gi),dim3(m0,mi,mi)>>>(lat, states, 1, a, epsilon);
   update_halos(lat);
 }
 
@@ -399,13 +405,13 @@ __host__ float* new_lattice(const bool verbose = false) {
     fprintf(stderr, "Allocating lattice array...\n");
     fprintf(stderr, "Requesting %d bytes...", M_bytes);
   }
-  // Allocate lattice on device
   assert(cudaMalloc(&lat, M_bytes) == cudaSuccess);
   if (verbose) {
     fprintf(stderr, " done.\n");
     fprintf(stderr, "Memset'ting to 0...");
   }
-  fill<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat, 0.0f);
+  fill<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat, INIT_VAL);
+  update_halos(lat);
   if (verbose) {
     fprintf(stderr, " done.\n");
   }
@@ -422,13 +428,13 @@ __host__ void delete_lattice(float ** lat) {
 __host__ curandState* new_rng(const bool verbose = false, unsigned long long seed = 0) {
 
   curandState * states;
+  const size_t bytes = M0*Mi*Mi*sizeof(curandState);
 
-  // Seed RNG on each thread
   if (verbose) {
     fprintf(stderr, "Allocating RNG...\n");
-    fprintf(stderr, "Requesting %d bytes...", N0/2*Ni*Ni*sizeof(curandState));
+    fprintf(stderr, "Requesting %d bytes...", bytes);
   }
-  assert(cudaMalloc(&states, N0/2*Ni*Ni*sizeof(curandState)) == cudaSuccess);
+  assert(cudaMalloc(&states, bytes) == cudaSuccess);
   if (verbose) {
     fprintf(stderr, " done.\n");
     fprintf(stderr, "Initializing RNG...");
@@ -436,7 +442,8 @@ __host__ curandState* new_rng(const bool verbose = false, unsigned long long see
   if (seed == 0) {
     seed = clock();
   }
-  rng_init<<<dim3(G0,Gi,Gi),dim3(B0/2,Bi,Bi)>>>(seed, states);
+  // Seed RNG on each thread
+  rng_init<<<dim3(G0,Gi,Gi),dim3(m0,mi,mi)>>>(seed, states);
   if (verbose) {
     fprintf(stderr, " done.\n");
   }
@@ -521,9 +528,10 @@ void mc_mean(const size_t N_cf, const size_t N_th, const float a, const float ep
     assert(cudaMemcpy(sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess);
     float mean = *sum_h / (N0*Ni*Ni*Ni);
     // Reset the lattice to zero for the next run
-    fill<<<dim3(G0,Gi,Gi),dim3(B0,Bi,Bi)>>>(lat, 0.0f);
+    fill<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat, INIT_VAL);
+    update_halos(lat);
+
     if (verbose >= 3) {
-      // Print the result
       fprintf(stderr, "Mean = %f\n", mean);
     }
     if (out) {
@@ -680,7 +688,7 @@ __host__ int main() {
 
   // full_run();
   // benchmark();
-  short_test(42);
+  short_test(42, "test_shared_mem.h5");
 
   return 0;
 }
