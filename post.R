@@ -1,5 +1,6 @@
 library(h5)
 library(ggplot2)
+library(stringr)
 
 ## Utility function to read a HDF5 file and create a data frame with it.
 read.h5 <- function(filename) {
@@ -34,4 +35,17 @@ scaling <- function(filename) {
   ggplot(data = dat, aes(x = Ni, y = t)) + geom_point() +
          geom_errorbar(aes(ymin = t-sd, ymax = t+sd), width=0.01) +
          scale_x_log10(expression(N[i]), breaks = breaks) + scale_y_log10("t [s]")
+}
+
+analyze.out <- function(filename) {
+
+  raw_data <- readLines(filename)
+  extracted <- str_match(raw_data, "^\\[(\\d):.*\\(ζ = (-?0\\.\\d{3})\\).*\\(ΔS = (-?\\d+\\.\\d{3})\\)")[,2:4]
+  dat <- apply(extracted, 1:2, as.numeric)
+  odd = sapply(dat[,1], as.logical)
+  even = !odd
+  plot(dat[,2][even], dat[,3][even], type = "p", pch = 20, col = rgb(0,0,0.5,0.5), cex = 0.3,
+       xlab = expression(zeta), ylab = expression(Delta*S))
+  points(dat[,2][odd], dat[,3][odd], type = "p", pch = 20, col = rgb(0.5,0,0,0.5), cex = 0.3)
+  grid()
 }
