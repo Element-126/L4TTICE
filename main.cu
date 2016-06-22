@@ -19,6 +19,11 @@
 // Geometry & parameters
 // =====================
 
+/*
+ * In general, caps correspond to the full lattice while small letters are
+ * related to the sub-lattice.
+ */
+
 // Sub-lattice size (without halos)
 constexpr size_t n0 = 8;
 constexpr size_t ni = 8;
@@ -26,6 +31,8 @@ constexpr size_t ni = 8;
 // Block size (with halos)
 constexpr size_t m0 = n0+2;
 constexpr size_t mi = ni+2;
+constexpr size_t m_count = m0*mi*mi*mi;
+constexpr size_t m_bytes = m_count*sizeof(float);
 // Number of threads per block: 10³ = 1000
 // Loop over the last dimension
 // Shared memory usage for the sub-lattice: 40000o including halos.
@@ -68,33 +75,36 @@ constexpr float INIT_VAL = 0.0f;
 // Variation of the action
 // =======================
 
-// Change in the action when φ(i) → φ(i) + ζ
-// Idx: array index, including ghost cells
-__device__ float delta_S_kin(float * f, const size_t Idx, const float zeta, const float a) {
+/*  Change in the action when φ(i) → φ(i) + ζ
+ *
+ *  idx: local array index, including ghost cells
+ *  f:   reference to the sub-lattice
+ */
+__device__ float delta_S_kin(float (&f)[m_count], const size_t idx, const float zeta, const float a) {
 
-  return a*a*zeta*( 4.0f*zeta + 8.0f*f[Idx]
-                    - f[Idx+1 ] - f[Idx-1 ] // ± (1,0,0,0)
-                    - f[Idx+s1] - f[Idx-s1] // ± (0,1,0,0)
-                    - f[Idx+s2] - f[Idx-s2] // ± (0,0,1,0)
-                    - f[Idx+s3] - f[Idx-s3] // ± (0,0,0,1)
+  return a*a*zeta*( 4.0f*zeta + 8.0f*f[idx]
+                    - f[idx+1 ] - f[idx-1 ] // ± (1,0,0,0)
+                    - f[idx+s1] - f[idx-s1] // ± (0,1,0,0)
+                    - f[idx+s2] - f[idx-s2] // ± (0,0,1,0)
+                    - f[idx+s3] - f[idx-s3] // ± (0,0,0,1)
                     );
 }
 
 // Free field: V(φ) = ½m²φ²
-__device__ float delta_S_free(float * f, const size_t Idx, const float zeta, const float a) {
+__device__ float delta_S_free(float (&f)[m_count], const size_t idx, const float zeta, const float a) {
 
-  const float fi = f[Idx];
+  const float fi = f[idx];
   const float delta_V = 0.5f*m2*zeta*(2.0f*fi+zeta);
-  return delta_S_kin(f, Idx, zeta, a) + a*a*a*a*delta_V;
+  return delta_S_kin(f, idx, zeta, a) + a*a*a*a*delta_V;
 }
 
 // Interacting field: V(φ) = ½m²φ² + ¼λφ⁴
-__device__ float delta_S_phi4(float * f, const size_t Idx, const float zeta, const float a) {
+__device__ float delta_S_phi4(float (&f)[m_count], const size_t idx, const float zeta, const float a) {
 
-  const float fi = f[Idx];     // φi
+  const float fi = f[idx];     // φi
   const float fiP = fi + zeta; // φi + ζ
   const float delta_V = 0.5f*m2*( fiP*fiP - fi*fi ) + 0.25f*lambda*( fiP*fiP*fiP*fiP - fi*fi*fi*fi );
-  return delta_S_kin(f, Idx, zeta, a) + a*a*a*a*delta_V;
+  return delta_S_kin(f, idx, zeta, a) + a*a*a*a*delta_V;
 }
 
 // Choice of the action used in the simulation
@@ -112,14 +122,14 @@ constexpr auto dS = delta_S_phi4;
  *  Blocksize should be (m0,mi,mi) and stride mi
  *  Gridsize should be (G0,Gi,Gi) and grid stride Gi
  *
- *  parity_offset: 0 for black sites, 1 for white ones
+ *  parity: 0 for black sites, 1 for white ones
  */ 
-template<float (*delta_S)(float*, const size_t, const float, const float)>
+template<float (*delta_S)(float(&)[m_count], const size_t, const float, const float)>
 __global__ void mc_update(float * lat, curandState * states, const int parity,
                           const float a, const float epsilon) {
 
   // 4D sub-lattice
-  __shared__ float sub[m0*mi*mi*mi];
+  __shared__ float sub[m_count];
 
   // Global thread index
   const size_t T0 = blockIdx.x * blockDim.x + threadIdx.x;
@@ -150,8 +160,16 @@ __global__ void mc_update(float * lat, curandState * states, const int parity,
   // Local array index (starting value)
   const size_t idx0 = threadIdx.x + s1*threadIdx.y + s2*threadIdx.z;
 
+  // if (!halo) {
+  //   printf("[%lu/%lu] State <- %lu\n", idx0, Idx0, tid);
+  // }
+
   // Grid stride loop in direction 3
   for (size_t b3 = 0 ; b3 < Gi ; ++b3) {
+
+    // if (tid == 0) {
+    //   printf(">> b3 = %lu\n", b3);
+    // }
 
     // Load values (including halos) in shared array
     for (size_t t3 = 0 ; t3 < mi ; ++t3) {
@@ -183,13 +201,19 @@ __global__ void mc_update(float * lat, curandState * states, const int parity,
 
           // Local array index
           const size_t idx = idx0 + s3*t3;
-      
+ 
           const float zeta = (2.0f*curand_uniform(&state) - 1.0f) * epsilon; // ζ ∈ [-ε,+ε]
           // Compute change in the action due to variation ζ at site Idx
           const float delta_S_i = delta_S(sub, idx, zeta, a);
-        
+ 
           // Update the lattice depending on the variation ΔSi
           const float update = (float) (delta_S_i < 0.0f || (exp(-delta_S_i) > curand_uniform(&state)));
+
+          // // DEBUG
+          // const size_t I3 = b3 * ni + t3;
+          // const size_t Idx = Idx0 + S3*I3;
+          // printf("[%d:%lu:%lu] %.3f -> (ζ = %.3f) -> (ΔS = %.3f) -> %.3f\n",
+          //        parity, idx, Idx, sub[idx], zeta, delta_S_i, sub[idx]+update*zeta);
 
           sub[idx] += update * zeta;
         }
@@ -198,7 +222,7 @@ __global__ void mc_update(float * lat, curandState * states, const int parity,
 
     // End divergence before writing back to global memory
     __syncthreads();
-    
+ 
     // Store values (except halos) in global array
     if (!halo) {
       for (size_t t3 = 1 ; t3 < mi-1 ; ++t3) {
@@ -208,7 +232,7 @@ __global__ void mc_update(float * lat, curandState * states, const int parity,
         const size_t Idx = Idx0 + S3*I3;
         // Local array index
         const size_t idx = idx0 + s3*t3;
-      
+
         lat[Idx] = sub[idx];
 
         // printf("%lu@(%u,%u,%u,%lu)[%.3f] -> %lu@(%lu,%lu,%lu,%lu)[%.3f]\n",
@@ -219,7 +243,9 @@ __global__ void mc_update(float * lat, curandState * states, const int parity,
   }
 
   // Write RNG state back to global memory
-  states[tid] = state;
+  if (!halo) {
+    states[tid] = state;
+  }
 }
 
 /******************************************************************************/
@@ -389,7 +415,7 @@ __host__ void update_halos(float * lat) {
 // ===============
 
 // Perform one Monte-Carlo iteration
-template <float (*delta_S)(float*, const size_t, const float, const float a)>
+template <float (*delta_S)(float(&)[m_count], const size_t, const float, const float a)>
 void mc_update(float* lat, curandState * states, const float a, const float epsilon) {
 
   mc_update<delta_S><<<dim3(G0,Gi,Gi),dim3(m0,mi,mi)>>>(lat, states, 0, a, epsilon);
@@ -409,7 +435,7 @@ __host__ float* new_lattice(const bool verbose = false) {
     fprintf(stderr, "Lattice: (%d,%d,%d,%d)\n", N0, Ni, Ni, Ni);
     fprintf(stderr, "Array:   (%d,%d,%d,%d)\n", M0, Mi, Mi, Mi);
     fprintf(stderr, "M_count = %d\n", M_count);
-    fprintf(stderr, "Shared memory per block: %d\n", m0*mi*mi*mi * sizeof(float));
+    fprintf(stderr, "Shared memory per block: %d bytes\n", m_bytes);
   
     fprintf(stderr, "Allocating lattice array...\n");
     fprintf(stderr, "Requesting %d bytes...", M_bytes);
@@ -644,6 +670,16 @@ __host__ void full_run() {
                "means.h5");
 }
 
+__host__ void short_run() {
+
+  mc_mean_temp(std::vector<float>({8., 6., 5., 4., 3., 2.5, 2., 1.5, 1.25, 1.}),
+               std::vector<size_t>({16, 12, 10, 8, 6, 6, 4, 4, 2, 2}),
+               std::vector<size_t>({2000, 6000, 10000, 17000, 30000, 38000, 50000, 85000, 110000, 150000}),
+               std::vector<float>({1., 3., 6., 10., 18., 24., 32., 80., 125., 200.}),
+               2, 10000,
+               "short_run.h5");
+}
+
 // The benchmark used to study scaling (where Bi = 2 B0 is varied)
 __host__ void benchmark() {
 
@@ -691,6 +727,17 @@ __host__ void debug(const unsigned long long seed) {
                seed);
 }
 
+__host__ void debug_2(const unsigned long long seed) {
+
+  mc_mean_temp(std::vector<float>({8.}),
+               std::vector<size_t>({1}),
+               std::vector<size_t>({1}),
+               std::vector<float>({0.1}),
+               3, 1,
+               "",
+               seed);
+}
+
 /*
  * Entry point of the program
  *
@@ -700,8 +747,9 @@ __host__ int main() {
 
   // full_run();
   // benchmark();
-  short_test(42, "test_shared_mem.h5");
-  // debug(1);
+  // short_test(42, "test_shared_mem.h5");
+  short_run();
+  // debug(2);
 
   return 0;
 }
