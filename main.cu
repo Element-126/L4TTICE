@@ -566,8 +566,12 @@ void mc_mean(const size_t N_cf, const size_t N_th, const float a, const float ep
     assert(cudaMemcpy(sum_h, sum_d, sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess);
     float mean = *sum_h / (N0*Ni*Ni*Ni);
     // Reset the lattice to zero for the next run
-    fill<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat, INIT_VAL);
-    update_halos(lat);
+    if (INIT_VAL == 0.0f) {
+      assert(cudaMemset(lat, 0, M_bytes) == cudaSuccess);
+    } else {
+      fill<<<dim3(G0,Gi,Gi),dim3(n0,ni,ni)>>>(lat, INIT_VAL);
+      update_halos(lat);
+    }
 
     if (verbose >= 3) {
       fprintf(stderr, "Mean = %f\n", mean);
