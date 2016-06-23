@@ -747,8 +747,8 @@ __host__ int main() {
 
   // full_run();
   // benchmark();
-  // short_test(42, "test_shared_mem.h5");
-  short_run();
+  short_test(42, "test_shared_mem.h5");
+  // short_run();
   // debug(2);
 
   return 0;
