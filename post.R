@@ -11,11 +11,19 @@ read.h5 <- function(filename) {
   dat
 }
 
+print.stats <- function(filename) {
+
+  dat <- read.h5(filename)
+  print(sprintf("t  = %f", mean(dat$t)))
+  print(sprintf("SD = %f", sd(dat$t)))
+}
+
 ## Plots each field mean value for each temperature as a dot.
 mean.scatterplot <- function(filename) {
 
   dat <- read.h5(filename)
 
+  graphics.off()
   dev.new(width = 5.5, height = 4.5)
   par(mar = c(4,5,1.5,1.5) + 0.1)
   breaks = c(1/4, 5/16, 3/8, 1/2 , 5/8, 3/4, 1.0, 1.25, 1.5, 2.0, 2.5, 3, 4, 5, 6, 8, 10)
@@ -29,6 +37,7 @@ mean.scatterplot <- function(filename) {
 scaling <- function(filename) {
 
   dat <- read.table(filename, header = TRUE)
+  graphics.off()
   dev.new(width = 4.5, height = 3.5)
   par(mar = c(4,5,1.5,1.5) + 0.1)
   breaks = 16*(1:5)
@@ -48,4 +57,27 @@ analyze.out <- function(filename) {
        xlab = expression(zeta), ylab = expression(Delta*S))
   points(dat[,2][odd], dat[,3][odd], type = "p", pch = 20, col = rgb(0.5,0,0,0.5), cex = 0.3)
   grid()
+
+efficiency <- function(file, outfile = "") {
+
+  dat <- rbind(read.table(file, header = TRUE))
+  dat$eff <- with(dat, N0*Ni^3 / t)
+  dat$eff <- dat$eff / max(dat$eff)
+
+  graphics.off()
+  dev.new(width = 5.5, height = 3.5)
+  par(mar = c(4,5,1.5,1.5) + 0.1)
+  breaks = 16*(1:dim(dat)[1])
+  my.labels <- c("No subdivision","4D subdomains","Shared memory")
+  plt <- ggplot(data = dat, aes(x = Ni, y = eff, color = factor(Run, labels = my.labels))) +
+         geom_point() + labs(color = "") +
+         scale_x_log10(expression(N[i]), breaks = breaks) +
+         scale_y_continuous(expression(epsilon), limits = c(0, max(dat$eff))) +
+         theme(axis.title.y = element_text(angle = 0))
+
+  print(plt)
+
+  if (outfile != "") {
+    dev.print(pdf, width = 5.5, height = 3.5, file = outfile)
+  }
 }
